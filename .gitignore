@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+dist/
+build/
+*.egg-info/
+.harness/pipeline.json
+.harness/proposed_skills.md
+.harness/stuck_notice.md
