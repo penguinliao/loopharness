@@ -59,6 +59,11 @@
 - **User-facing messages in user's language** — "邮箱格式不对" not "ValueError: invalid".
 - **Distinguish client errors (4xx) from server errors (5xx)** — bad input is 400, not 500.
 
+## Database connections / resources
+
+- **Always close DB connections** — use `try/finally`, context manager, or framework pool. A connection leaked in the error path (e.g. inside `except IntegrityError`) will eventually exhaust SQLite locks or pool slots and the next request will hang or 500. Pattern that bites: `try: conn = sqlite3.connect(); conn.execute(...) except IntegrityError: raise HTTPException(...)` — `conn` was never closed. Fix: wrap in `with sqlite3.connect(...) as conn:` or move `conn.close()` into a `finally`. Source: v1.0 task_06 run, where the AI's IntegrityError handler caused subsequent /register requests to time out.
+- **File handles, sockets, subprocesses** — same rule: always close in `finally`. Don't trust GC.
+
 ---
 
 ## How to add a new entry
