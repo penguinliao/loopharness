@@ -1,5 +1,42 @@
 # Changelog
 
+## v1.0.5 — 2026-04-26
+
+**Same-day hotfix for v1.0.4 path bug.** v1.0.4 wrote the auto-start
+guide to `<project>/.claude/CLAUDE.md`, but Claude Code's standard
+project-level CLAUDE.md location is the **project root**
+(`<project>/CLAUDE.md`). The file was correctly created but Claude
+Code never loaded it, so v1.0.4 had no observable behavior change.
+
+PM hit this immediately: ran `harness init` → `claude` → described
+task → Claude started working without first running `harness start`.
+Inspection showed `.claude/CLAUDE.md` did contain the guide, but it
+wasn't picked up.
+
+### Fix
+
+- `_ensure_claude_md` now writes to `<project>/CLAUDE.md` (the location
+  Claude Code actually loads on session start).
+- Existing `<project>/.claude/CLAUDE.md` files from v1.0.4 are
+  harmless leftovers (delete or leave; Claude Code ignores them).
+- All idempotency / preserve-existing-content semantics from v1.0.4
+  are unchanged — just the destination path is fixed.
+
+### Migration from v1.0.4
+
+Re-run `harness init` in any project where you ran v1.0.4's init:
+
+```
+cd your-project
+harness init   # now writes the correct path
+```
+
+Optionally remove the stale file (does no harm if you don't):
+
+```
+rm -f .claude/CLAUDE.md
+```
+
 ## v1.0.4 — 2026-04-26
 
 UX critical fix. v1.0.3 required PM to manually run `harness start "..."`

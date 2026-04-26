@@ -15,7 +15,7 @@ def test_init_writes_claude_md() -> None:
         import argparse
         args = argparse.Namespace(project=str(tmp))
         pl.cmd_init(args)
-        md = tmp / ".claude" / "CLAUDE.md"
+        md = tmp / "CLAUDE.md"
         if not md.exists():
             raise AssertionError(".claude/CLAUDE.md was not created")
         content = md.read_text()
@@ -35,9 +35,9 @@ def test_init_idempotent_on_existing_guide() -> None:
         import argparse
         args = argparse.Namespace(project=str(tmp))
         pl.cmd_init(args)
-        first = (tmp / ".claude" / "CLAUDE.md").read_text()
+        first = (tmp / "CLAUDE.md").read_text()
         pl.cmd_init(args)
-        second = (tmp / ".claude" / "CLAUDE.md").read_text()
+        second = (tmp / "CLAUDE.md").read_text()
         if first != second:
             raise AssertionError("re-running init changed content (not idempotent)")
         # Count only the opening tag (closing tag also contains the substring)
@@ -53,13 +53,13 @@ def test_init_preserves_existing_user_claude_md() -> None:
     from claude_hh import pipeline as pl
     tmp = Path(tempfile.mkdtemp(prefix="v104_preserve_"))
     try:
-        (tmp / ".claude").mkdir()
+        # project root always exists
         original = "# My project" + chr(10) + chr(10) + "This is my own CLAUDE.md content." + chr(10)
-        (tmp / ".claude" / "CLAUDE.md").write_text(original)
+        (tmp / "CLAUDE.md").write_text(original)
         import argparse
         args = argparse.Namespace(project=str(tmp))
         pl.cmd_init(args)
-        result = (tmp / ".claude" / "CLAUDE.md").read_text()
+        result = (tmp / "CLAUDE.md").read_text()
         if "My project" not in result:
             raise AssertionError("existing user content was lost")
         if "claude-hh:auto-start-guide" not in result:

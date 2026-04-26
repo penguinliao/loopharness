@@ -48,8 +48,7 @@ In the spec stage, also run `harness hermes-show` to see the merged checklist. A
 
 def _ensure_claude_md(root: Path) -> None:
     """Idempotent: append H-H auto-start guide to .claude/CLAUDE.md (or create)."""
-    md = root / ".claude" / "CLAUDE.md"
-    md.parent.mkdir(parents=True, exist_ok=True)
+    md = root / "CLAUDE.md"  # project-root: standard Claude Code load location
     if md.exists():
         existing = md.read_text()
         if "<!-- claude-hh:auto-start-guide" in existing:
