@@ -4,6 +4,60 @@ import argparse, glob, json, subprocess, sys, textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
+CLAUDE_MD_GUIDE = """
+<!-- claude-hh:auto-start-guide v1.0.4 -->
+
+## Claude H-H Auto-Start Protocol
+
+This project uses Claude H-H (spec-first pipeline). Follow this protocol on every session start, **before responding to the user**:
+
+### Step 1: Read pipeline state
+
+Run `cat .harness/pipeline.json 2>/dev/null` (or use Read tool):
+
+- **File missing or empty** → no pipeline yet. Go to Step 2.
+- **File exists** → read the `description` field — that IS the user's current task. Read `current_stage`, then act:
+  - `spec` → write `.harness/spec.md` (≥3 P0 ACs) + `.harness/test_*.py`. When done: `harness advance`.
+  - `implement` → edit code files to satisfy spec. When tests pass: `harness advance`.
+  - `review` → write `.harness/review_report.md` ending with `PROCEED` or `FAIL`. Then: `harness advance`.
+  - `test` → run `harness advance` (pipeline runs tests automatically).
+  - `done` / `stuck` → tell the user the result; ask before reset.
+
+For full stage instructions, run `harness start --help` or read `~/.claude-hh/prompts/0X_<stage>.md`.
+
+### Step 2: User gives you a new task
+
+When the user describes a task in chat and pipeline.json does NOT exist:
+
+1. Extract a concise description (<=80 chars, in the user's language)
+2. **Run** (don't ask the user to run): `harness start "<extracted description>"`
+3. Then go back to Step 1
+
+### Step 3: Hermes consultation
+
+In the spec stage, also run `harness hermes-show` to see the merged checklist. Apply relevant items as P0 ACs.
+
+### Critical rules
+
+- **The user is non-technical.** Never ask them to run `harness` commands themselves.
+- **Don't ask for clarification before starting.** Start pipeline with what the user said.
+- **Don't reset pipeline without explicit permission.**
+- **Failures show in stop-hook output.** If stuck, run `harness advance` (or fix and retry).
+<!-- /claude-hh:auto-start-guide -->
+"""
+
+def _ensure_claude_md(root: Path) -> None:
+    """Idempotent: append H-H auto-start guide to .claude/CLAUDE.md (or create)."""
+    md = root / ".claude" / "CLAUDE.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    if md.exists():
+        existing = md.read_text()
+        if "<!-- claude-hh:auto-start-guide" in existing:
+            return  # already installed
+        md.write_text(existing.rstrip() + chr(10) + chr(10) + CLAUDE_MD_GUIDE)
+    else:
+        md.write_text(CLAUDE_MD_GUIDE)
+
 STAGE_LABELS = {"spec":"SPEC","implement":"IMPLEMENT","review":"REVIEW","test":"TEST","done":"DONE","stuck":"STUCK"}
 PROMPTS = {s: Path(__file__).parent.parent/"prompts"/f"0{i+1}_{s}.md" for i,s in enumerate(["spec","implement","review","test"])}
 NEXT_STEPS = {
@@ -100,6 +154,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     h.setdefault("PreToolUse",[]).append({"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":f"python3 {hh}/hooks/pre_edit.py"}]})
     h.setdefault("Stop",[]).append({"hooks":[{"type":"command","command":f"python3 {hh}/hooks/stop_check.py"}]})
     sf.write_text(json.dumps(cfg, indent=2)); _hdir(root)
+    _ensure_claude_md(root)
     print(f"Claude H-H 初始化在 {root}  运行 `harness start [描述]` 开始。")
 
 def cmd_start(args: argparse.Namespace) -> None:

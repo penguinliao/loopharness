@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.0.4 — 2026-04-26
+
+UX critical fix. v1.0.3 required PM to manually run `harness start "..."`
+in the shell — but a non-technical PM hits zsh quoting issues (`[...]`
+triggers glob, missing quotes split the description into multiple words,
+etc.). v1.0.4 closes that gap.
+
+### What's new
+
+- **`harness init`** now also writes `.claude/CLAUDE.md` containing the
+  auto-start protocol. Claude Code reads this file on session start.
+- **PM no longer types `harness start`**. Just open the project, run
+  `claude`, describe the task in chat — Claude reads the protocol,
+  extracts the description, and runs `harness start "..."` itself.
+- Existing `.claude/CLAUDE.md` (user-written) is preserved; the guide
+  is appended with a marker comment for idempotency.
+
+### Why this earned a hotfix (vs the 5 issues left in KNOWN_ISSUES)
+
+PM hit this in real first use within minutes of v1.0.3 install:
+- Tried `harness start [给星阙做个官网...]` → zsh bad pattern error
+- Re-tried with quotes, succeeded, but then `claude` couldn't see the
+  task because the SPEC prompt didn't tell it to read pipeline.json's
+  description field
+
+The 5 KNOWN_ISSUES are theoretical; this one had a concrete user-pain
+event with screenshots. Per v1.0 manifesto: real PM-impact triggers a
+hotfix, theoretical concerns wait.
+
+### Migration
+
+Existing v1.0.3 users: re-run `harness init` in your project to get the
+new `.claude/CLAUDE.md`. No other changes needed.
+
 ## v1.0.3 — 2026-04-26
 
 **The "actually self-improving" release.** v1.0 had Hermes as a single
