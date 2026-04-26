@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.0.6 — 2026-04-26
+
+**Same-day hotfix #2 for v1.0.4-1.0.5 partial-protocol problem.** v1.0.5 fixed
+the file path so Claude Code does load the project CLAUDE.md, but real PM
+session showed Claude still used v0.3.x patterns: `python3 -m harness.pipeline`
+old long form, `~/Desktop/harness-engineering/` path, multi-Agent roleplay,
+`--route=standard` flags. Reason: the user's global `~/.claude/CLAUDE.md`
+contains heavy v0.3.x instructions accumulated during v0.3.x development; the
+project-level guide was too soft to override the user-level prior.
+
+### Fix
+
+The auto-start guide now leads with an explicit **Priority Override** section
+that names the v0.3.x patterns to ignore (specific paths, command forms,
+sub-agent names, deprecated flags) and asserts the v1.0.x replacements.
+
+This is a prompt-engineering fix, not a hard guarantee — Claude still
+ultimately decides whether to follow the project-level guide. But explicit
+"ignore X / use Y instead" instructions in the project CLAUDE.md are the
+strongest mechanism Claude Code currently exposes for this.
+
+### Migration
+
+v1.0.5 users: re-run `harness init` to update each project's CLAUDE.md to
+the v1.0.6 version. Old `<!-- claude-hh:auto-start-guide v1.0.5 -->` markers
+will be **replaced**, not duplicated, by the new init code (see migration
+fix below).
+
+### Note on idempotency across versions
+
+`_ensure_claude_md` previously matched `<!-- claude-hh:auto-start-guide` (any
+version) and skipped if found, which would prevent v1.0.5 users from getting
+the v1.0.6 guide on re-init. Fixed: if the existing marker version differs
+from current, replace the marked block; same version, skip.
+
+
 ## v1.0.5 — 2026-04-26
 
 **Same-day hotfix for v1.0.4 path bug.** v1.0.4 wrote the auto-start
