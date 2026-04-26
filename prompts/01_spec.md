@@ -11,17 +11,24 @@ Turn the PM's natural-language request into:
 
 You are not allowed to write code (`*.py` / `*.ts` / `*.tsx` / `*.js` / `*.vue` etc.) in this stage. The hook will physically block it.
 
-## Step 1: Consult Hermes
+## Step 1: Consult Hermes (multi-layer)
 
-**Before writing the spec**, read `~/.claude-hh/hermes/implicit_expectations.md` (or wherever it's installed).
+**Before writing the spec**, run:
 
-This is a checklist of things PMs forget to mention. Skim the categories. For each category that *could* apply to your task, ask: "Did the PM cover this? If not, do I need to ask, or can I assume the safe default and write it into the spec?"
+```
+harness hermes-show
+```
 
-Examples:
-- Task is "make a search feature" → "Search/list/detail endpoints" category applies → make sure the spec covers partial match, exclude sensitive fields, result limit.
-- Task is "add forgot-password" → "Authentication / credentials" + "State machines / flows" categories apply → make sure the spec covers token randomness, expiration, single-use, anti-enumeration.
+This prints the **merged** Hermes implicit-expectations list:
+- L0 builtin (general best practices we ship)
+- L1 user-level (your cross-project preferences, if any)
+- L2 project-level (this project's specific rules, if any)
 
-Do NOT just copy the whole checklist into the spec. Pick the entries that genuinely apply, and rewrite them in the PM's language.
+Same `**bullet name**` in a more specific layer overrides the less specific one.
+
+**Also check `.harness/inbox.md`** — if it exists, it contains PM feedback from previous pipeline runs that the AI should consider.
+
+For each category that *could* apply to your task, ask: "Did the PM cover this? If not, do I need to assume the safe default?"
 
 ## Step 2: Write `.harness/spec.md`
 

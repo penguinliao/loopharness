@@ -1,4 +1,4 @@
-"""Claude H-H v1.0 — Spec-first pipeline for Claude Code."""
+"""Claude H-H v1.0.3 — spec-first pipeline."""
 
-__version__ = "1.0.0"
-__all__ = ["pipeline", "hermes_propose"]
+__version__ = "1.0.3"
+__all__ = ["pipeline", "hermes_propose", "hermes_loader"]

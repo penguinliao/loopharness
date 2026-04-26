@@ -160,16 +160,39 @@ def cmd_reset(args: argparse.Namespace) -> None:
 def cmd_hermes_review(args: argparse.Namespace) -> None:
     from claude_hh import hermes_propose; hermes_propose.interactive_review()
 
+def cmd_feedback(args: argparse.Namespace) -> None:
+    root = _require_root(args)
+    text = " ".join(args.text) if args.text else ""
+    if not text.strip():
+        print('用法: harness feedback "一句话反馈"'); return
+    inbox = _hdir(root) / "inbox.md"
+    entry = "- [" + _now()[:19] + "] " + text.strip() + chr(10)
+    with inbox.open("a") as f:
+        f.write(entry)
+    print("✓ 已记录到 .harness/inbox.md。下次 pipeline 完成时会反思。")
+
+
+def cmd_hermes_show(args: argparse.Namespace) -> None:
+    root = _find_root(Path(args.project) if args.project else None)
+    from claude_hh.hermes_loader import load_layers
+    result = load_layers(root)
+    print(result if result else "(no hermes layers found)")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="harness", description="Claude H-H v1.0 — spec-first pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent("""  init            初始化项目\n  start [desc]    开始 pipeline\n  advance         推进阶段\n  retreat         手动回退\n  status          查看状态\n  reset           重置\n  hermes-review   审核提议"""))
+        epilog=textwrap.dedent("""  init            初始化项目\n  start [desc]    开始 pipeline\n  advance         推进阶段\n  retreat         手动回退\n  status          查看状态\n  reset           重置\n  hermes-review   审核提议
+  feedback "..."  PM 反馈，下次 pipeline 时反思
+  hermes-show     显示合并后的 implicit expectations 清单"""))
     ap.add_argument("--project", default=None)
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("init"); ps = sub.add_parser("start"); ps.add_argument("desc",nargs="*")
     for c in ("advance","retreat","status","reset","hermes-review"): sub.add_parser(c)
+    pf = sub.add_parser("feedback"); pf.add_argument("text", nargs="*")
+    sub.add_parser("hermes-show")
     args = ap.parse_args()
     {"init":cmd_init,"start":cmd_start,"advance":cmd_advance,"retreat":cmd_retreat,
-     "status":cmd_status,"reset":cmd_reset,"hermes-review":cmd_hermes_review}.get(args.cmd, lambda _: ap.print_help())(args)
+     "status":cmd_status,"reset":cmd_reset,"hermes-review":cmd_hermes_review,"feedback":cmd_feedback,"hermes-show":cmd_hermes_show}.get(args.cmd, lambda _: ap.print_help())(args)
 
 if __name__ == "__main__": main()
