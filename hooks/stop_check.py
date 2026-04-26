@@ -15,7 +15,9 @@ def main() -> None:
     try: stage = json.loads((root/".harness"/"pipeline.json").read_text()).get("current_stage","")
     except Exception: sys.exit(0)
     if stage in ("done","stuck",""): sys.exit(0)
-    print(f"[claude-hh] ⚠️  pipeline 未完成（{stage.upper()}），请运行 `python3 -m claude_hh.pipeline advance`。", file=sys.stderr)
+    # v1.0.7: tolerate v0.3.x int stages (1/3/4/5) — coerce to str to avoid AttributeError
+    label = stage.upper() if isinstance(stage, str) else f"stage-{stage}"
+    print(f"[claude-hh] ⚠️  pipeline 未完成（{label}），请运行 `harness advance`。", file=sys.stderr)
     sys.exit(2)
 
 if __name__ == "__main__": main()
