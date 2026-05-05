@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.1 — 2026-05-05 (same-day hotfix)
+
+**`harness status` now tolerates v0.3.x pipeline.json (int stage values).**
+
+A PM in a real project (already had v0.3.x `pipeline.json` with `current_stage: 6` and `task_description: ...`) hit `AttributeError: 'int' object has no attribute 'upper'` when running `harness status` after upgrading to v1.1.0.
+
+`stop_check` was already fixed for this in v1.0.7, but `cmd_status` wasn't.
+
+### Fix
+
+- `cmd_status` now handles both v0.3.x int stages (1..6) and v1.x string stages
+- Also reads `task_description` (v0.3.x field name) as fallback for `description`
+- v0.3.x `done` state shows the friendly suggestion to `harness reset` + `harness start` for the next task
+
+No behavior change for v1.x-native pipelines.
+
+---
+
 ## v1.1.0 — 2026-05-05
 
 **Adds G4 — cross-family LLM consensus audit, ported from v0.3.4 self-bootstrap.**

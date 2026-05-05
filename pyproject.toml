@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-hh"
-version = "1.1.0"
+version = "1.1.1"
 description = "Spec-first pipeline for Claude Code with G4 cross-family audit. 300 lines core + ~1500 lines for the optional G4 gate."
 readme = "README.md"
 license = { text = "MIT" }

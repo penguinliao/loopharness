@@ -285,11 +285,18 @@ def cmd_status(args: argparse.Namespace) -> None:
     root = _find_root(Path(args.project) if args.project else None)
     if root is None: print("没有活跃 pipeline。运行 `harness init` + `harness start` 开始。"); return
     s = _load(root); stage = s["current_stage"]
-    desc = s.get("description", "-")
+    desc = s.get("description") or s.get("task_description") or "-"
     rc = s.get("retreat_count", 0)
-    st = s.get("started_at", "-")[:19]
-    lbl = STAGE_LABELS.get(stage, stage.upper())
-    nxt = NEXT_STEPS.get(stage, "-")
+    st = (s.get("started_at") or "-")[:19]
+    # Cross-version compat: v0.3.x writes int stages (1..6), v1.x writes strings.
+    if isinstance(stage, int):
+        v03_map = {1:"spec",2:"design",3:"implement",4:"review",5:"test",6:"done"}
+        stage_str = v03_map.get(stage, f"stage{stage}")
+        lbl = STAGE_LABELS.get(stage_str, f"v0.3.x stage {stage}")
+        nxt = NEXT_STEPS.get(stage_str, "(v0.3.x state — 建议 `harness reset` + `harness start` 启新 v1.x pipeline)")
+    else:
+        lbl = STAGE_LABELS.get(stage, stage.upper())
+        nxt = NEXT_STEPS.get(stage, "-")
     print(f"Pipeline: {desc}  [{lbl}]  retreat:{rc}/3  start:{st}")
     print(f"  下一步: {nxt}")
 
