@@ -235,7 +235,22 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_start(args: argparse.Namespace) -> None:
     root = Path(args.project) if args.project else Path.cwd()
-    if _pj(_hdir(root)).exists(): print("已有 pipeline，请先 `harness reset`。"); sys.exit(1)
+    _hdir(root)  # 确保 .harness/ 存在
+    pj = _pj(root)
+    if pj.exists():
+        # 已 done/stuck → 自动 reset 启新任务（PM 体验：开工不用敲两行）
+        # 进行中 (spec/implement/review/test, 或 v0.3.x int 1..5) → 拒绝，保护未完成任务
+        try:
+            stage = json.loads(pj.read_text()).get("current_stage")
+        except Exception:
+            stage = None
+        is_finished = (stage in ("done","stuck")) or (isinstance(stage,int) and stage >= 6)
+        if is_finished:
+            pj.unlink()
+            print(f"上一个 pipeline 已 {stage}，自动清理。")
+        else:
+            print(f"已有进行中的 pipeline (stage={stage})。先做完它，或运行 `harness reset` 抛弃。")
+            sys.exit(1)
     desc = " ".join(args.desc) if args.desc else "未命名任务"
     _save(root,{"current_stage":"spec","retreat_count":0,"description":desc,"started_at":_now(),"updated_at":_now(),"stage_history":[{"stage":"spec","entered_at":_now()}]})
     print(f"Pipeline 已启动：{desc}  当前阶段：SPEC"); _prompt("spec"); print("完成后运行 `harness advance`。")

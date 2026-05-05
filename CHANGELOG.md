@@ -1,5 +1,51 @@
 # Changelog
 
+## v1.1.2 — 2026-05-05 (same-day P0 fix + UX)
+
+**Fixes a latent P0 in `cmd_start` that has been silent since v1.0, plus a PM-friendly UX upgrade.**
+
+### P0 fix: `cmd_start` was never actually rejecting overwrites
+
+```python
+# v1.0..v1.1.1 (BROKEN)
+if _pj(_hdir(root)).exists(): print("已有 pipeline，请先 `harness reset`."); sys.exit(1)
+```
+
+`_hdir(root)` returns `root/".harness"`. `_pj(some_path)` returns `some_path/".harness"/"pipeline.json"`. So `_pj(_hdir(root))` = `root/".harness"/".harness"/"pipeline.json"` — a path with double `.harness/` that **never exists**. The exists() check was always False; the rejection branch was dead code.
+
+This means since v1.0, `harness start "<new>"` on a project with an in-progress pipeline (any of spec/implement/review/test) would **silently overwrite the existing pipeline.json**, destroying the work-in-progress task without warning. Latent P0 — not triggered in practice because PMs typically don't double-start, but the safety net was off.
+
+### UX: `harness start` now auto-resets when previous pipeline is `done` / `stuck`
+
+Before:
+```
+$ harness start "next task"
+已有 pipeline，请先 `harness reset`.
+$ harness reset
+$ harness start "next task"
+```
+
+After:
+```
+$ harness start "next task"
+上一个 pipeline 已 done，自动清理。
+Pipeline 已启动：next task  当前阶段：SPEC
+```
+
+In-progress pipelines (spec/implement/review/test) are still protected — `start` rejects with a clear message. Only terminal states (`done`, `stuck`, or v0.3.x int `>= 6`) trigger auto-reset.
+
+### Why this is in v1.x
+
+- The P0 fix has to ship: silent overwrite of in-progress pipelines is a data-loss bug
+- The UX change saves PM one redundant command per task, doesn't add complexity
+- Both compatible with v1.0 manifesto
+
+### Upgrade
+
+Drop-in replacement for v1.1.1.
+
+---
+
 ## v1.1.1 — 2026-05-05 (same-day hotfix)
 
 **`harness status` now tolerates v0.3.x pipeline.json (int stage values).**
