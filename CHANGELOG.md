@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.1.0 — 2026-05-05
+
+**Adds G4 — cross-family LLM consensus audit, ported from v0.3.4 self-bootstrap.**
+
+v1.0 stripped 96% of v0.3.4 because A/B data showed the only feature that helped was spec-first. We held that line for v1.0.x.
+
+But after v1.0 shipped, the v0.3.4 codebase (kept as a research archive) was used to develop one new mechanism that **does** produce measurable value: **cross-family LLM consensus review**. Three different model families (Claude Opus + Sonnet + DeepSeek V4 Pro) independently audit `git diff`. ≥2 must report `P0=0` for 3 consecutive rounds before DEPLOY is unlocked.
+
+Self-bootstrap on the original codebase: 18 rounds of audit found 65 issues, distilled into 21 cross-project P0 categories. These categories are auto-injected as prior defense into every future antagonist run.
+
+### Why this is in v1.x and not "v0.3.5"
+
+The 21 P0 categories are real, repeatable, and worth keeping. Same-family review (Claude reviewing Claude) systematically misses them because the reviewer shares the writer's RLHF blind spots. Cross-family breaks that.
+
+### Added
+
+- `claude_hh/antagonist.py` — core state machine + 3-family parallel audit (~1100 lines)
+- `claude_hh/antagonist_cli.py` — CLI subcommand (~370 lines)
+- `prompts/antagonist.md` — system prompt template
+- `knowledge/antagonist_issues.md` — 21 cross-project P0 categories (the self-bootstrap output, kept 1:1)
+- `harness antagonist run` / `harness antagonist reset` — new subcommands
+- Pipeline integration: `harness advance` from TEST to DONE now requires `consecutive_pass >= 3` if `DEEPSEEK_API_KEY` is set; G4 is gracefully skipped (with notice) if no key
+
+### Configuration
+
+```bash
+# In your project's .env:
+DEEPSEEK_API_KEY=sk-...     # second non-Claude family for consensus
+ANTHROPIC_API_KEY=sk-ant-... # already required
+```
+
+If `DEEPSEEK_API_KEY` is not set, G4 is skipped with a friendly notice — v1.1 stays a strict superset of v1.0.x behavior.
+
+### Upgrade
+
+No breaking changes. Existing pipelines continue to work; G4 only kicks in between TEST and DONE when the key is configured.
+
+---
+
+## v1.0.7 — 2026-04-30 (undocumented at the time)
+
+`stop_check` now tolerates v0.3.x integer stage values for cross-version pipeline state compatibility.
+
+---
+
 ## v1.0.6 — 2026-04-26
 
 **Same-day hotfix #2 for v1.0.4-1.0.5 partial-protocol problem.** v1.0.5 fixed

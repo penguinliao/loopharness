@@ -1,6 +1,6 @@
 """Claude H-H v1.0 — spec-first pipeline CLI."""
 from __future__ import annotations
-import argparse, glob, json, re, subprocess, sys, textwrap
+import argparse, glob, json, os, re, subprocess, sys, textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -177,6 +177,25 @@ def _check_review(root: Path) -> "tuple[bool,str]":
     if not _ruff_mypy(root): return False, "ruff/mypy 未通过。"
     return True, ""
 
+def _check_g4(root: Path) -> "tuple[bool,str]":
+    """Gate 4: cross-family antagonist audit. Pass = consecutive_pass >= 3.
+
+    Skipped when DEEPSEEK_API_KEY 未配置（G4 需要至少 2 家 LLM，DeepSeek 是第二家）。
+    """
+    state_file = root/".harness"/"antagonist_state.json"
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        return True, "(G4 跳过: DEEPSEEK_API_KEY 未配置；建议配置后启用跨家族审查)"
+    if not state_file.exists():
+        return False, "G4 终审尚未跑。运行 `harness antagonist run` 启动跨家族审查（cp 需达 3）。"
+    try:
+        s = json.loads(state_file.read_text())
+        cp = s.get("consecutive_pass", 0)
+        if cp >= 3:
+            return True, ""
+        return False, f"G4 终审 cp={cp}/3。继续运行 `harness antagonist run` 直到 cp=3。"
+    except Exception as e:
+        return False, f"G4 状态文件读取失败：{e}"
+
 def _run_tests(root: Path) -> "tuple[bool,str]":
     tests = glob.glob(str(root/".harness"/"test_*.py"))
     if not tests: return False, "没有 .harness/test_*.py。"
@@ -247,8 +266,16 @@ def _finish_test(root: Path) -> None:
     ok, msg = _run_tests(root)
     state = _load(root)
     if not ok: _retreat(root,state,msg); return
+    print("所有测试通过！")
+    g4_ok, g4_msg = _check_g4(root)
+    if not g4_ok:
+        # G4 未通过：保留在 test 阶段，提示 PM 跑 antagonist
+        print(g4_msg)
+        return
+    if g4_msg:
+        print(g4_msg)  # G4 跳过时的友好提示
     state["current_stage"]="done"; state["updated_at"]=_now(); _save(root,state)
-    print("所有测试通过！Pipeline 完成。")
+    print("Pipeline 完成。")
     from claude_hh import hermes_propose; hermes_propose.propose(root)
 
 def cmd_retreat(args: argparse.Namespace) -> None:
@@ -291,20 +318,32 @@ def cmd_hermes_show(args: argparse.Namespace) -> None:
     print(result if result else "(no hermes layers found)")
 
 
+def cmd_antagonist(args: argparse.Namespace) -> None:
+    """Run G4 cross-family audit. Delegates to claude_hh.antagonist_cli.main()."""
+    from claude_hh import antagonist_cli
+    project = args.project or str(_find_root(Path.cwd()) or Path.cwd())
+    sub = args.antagonist_cmd or "run"
+    sys.exit(antagonist_cli.main([sub, "--project", project]))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="harness", description="Claude H-H v1.0 — spec-first pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""  init            初始化项目\n  start [desc]    开始 pipeline\n  advance         推进阶段\n  retreat         手动回退\n  status          查看状态\n  reset           重置\n  hermes-review   审核提议
   feedback "..."  PM 反馈，下次 pipeline 时反思
-  hermes-show     显示合并后的 implicit expectations 清单"""))
+  hermes-show     显示合并后的 implicit expectations 清单
+  antagonist run  跑 G4 跨家族终审（≥2 家 P0=0 × 3 轮才放行 DEPLOY）
+  antagonist reset  G4 修完代码后清掉 unfixed 标记"""))
     ap.add_argument("--project", default=None)
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("init"); ps = sub.add_parser("start"); ps.add_argument("desc",nargs="*")
     for c in ("advance","retreat","status","reset","hermes-review"): sub.add_parser(c)
     pf = sub.add_parser("feedback"); pf.add_argument("text", nargs="*")
     sub.add_parser("hermes-show")
+    pa = sub.add_parser("antagonist"); pa.add_argument("antagonist_cmd", nargs="?", choices=["run","reset"], default="run")
     args = ap.parse_args()
     {"init":cmd_init,"start":cmd_start,"advance":cmd_advance,"retreat":cmd_retreat,
-     "status":cmd_status,"reset":cmd_reset,"hermes-review":cmd_hermes_review,"feedback":cmd_feedback,"hermes-show":cmd_hermes_show}.get(args.cmd, lambda _: ap.print_help())(args)
+     "status":cmd_status,"reset":cmd_reset,"hermes-review":cmd_hermes_review,"feedback":cmd_feedback,
+     "hermes-show":cmd_hermes_show,"antagonist":cmd_antagonist}.get(args.cmd, lambda _: ap.print_help())(args)
 
 if __name__ == "__main__": main()
