@@ -213,6 +213,8 @@ def _retreat(root: Path, state: dict, reason: str) -> None:
     state["current_stage"] = "implement"
     state.setdefault("stage_history",[]).append({"stage":"implement","entered_at":_now(),"reason":f"retreat #{n}"})
     _save(root, state); print(f"retreat 到 IMPLEMENT（第 {n}/3 次）。原因：{reason}  请修复后运行 `harness advance`。")
+    if n >= 2:
+        print('💬 retreat 多次撞到坑了？一句话：harness feedback "<什么卡住了>"  帮我下次改流程。')
 
 def _require_root(args: argparse.Namespace) -> Path:
     root = _find_root(Path(args.project) if args.project else None)
@@ -227,11 +229,52 @@ def cmd_init(args: argparse.Namespace) -> None:
     cfg = json.loads(sf.read_text()) if sf.exists() else {}
     hh = Path(__file__).parent.parent
     h = cfg.setdefault("hooks", {})
-    h.setdefault("PreToolUse",[]).append({"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":f"python3 {hh}/hooks/pre_edit.py"}]})
-    h.setdefault("Stop",[]).append({"hooks":[{"type":"command","command":f"python3 {hh}/hooks/stop_check.py"}]})
+
+    pre_edit_cmd = f"python3 {hh}/hooks/pre_edit.py"
+    stop_check_cmd = f"python3 {hh}/hooks/stop_check.py"
+
+    def _is_v03(cmd: str) -> bool:
+        return "harness-engineering" in cmd or "/install_v2.py" in cmd
+    def _is_v1(cmd: str) -> bool:
+        return ".claude-hh/hooks/" in cmd or cmd in (pre_edit_cmd, stop_check_cmd)
+
+    cleaned_v03, kept_v1 = 0, 0
+    for stage in list(h.keys()):
+        new_entries = []
+        for entry in h.get(stage, []):
+            new_hooks = []
+            for hk in entry.get("hooks", []):
+                cmd = hk.get("command", "")
+                if _is_v03(cmd):
+                    cleaned_v03 += 1; continue
+                if _is_v1(cmd):
+                    kept_v1 += 1
+                new_hooks.append(hk)
+            if new_hooks:
+                e = dict(entry); e["hooks"] = new_hooks; new_entries.append(e)
+        h[stage] = new_entries
+
+    has_pre_edit = any(any(hk.get("command")==pre_edit_cmd for hk in e.get("hooks",[])) for e in h.get("PreToolUse",[]))
+    has_stop_check = any(any(hk.get("command")==stop_check_cmd for hk in e.get("hooks",[])) for e in h.get("Stop",[]))
+
+    added = []
+    if not has_pre_edit:
+        h.setdefault("PreToolUse",[]).append({"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":pre_edit_cmd}]})
+        added.append("pre_edit")
+    if not has_stop_check:
+        h.setdefault("Stop",[]).append({"hooks":[{"type":"command","command":stop_check_cmd}]})
+        added.append("stop_check")
+
     sf.write_text(json.dumps(cfg, indent=2)); _hdir(root)
     _ensure_claude_md(root)
-    print(f"Claude H-H 初始化在 {root}  运行 `harness start [描述]` 开始。")
+
+    parts = []
+    if cleaned_v03: parts.append(f"清理 {cleaned_v03} 个 v0.3.x 老 hook")
+    if added: parts.append(f"装 {len(added)} 个 v1 hook ({'+'.join(added)})")
+    if not parts: parts.append("hooks 已就绪（幂等，无变化）")
+    print(f"Claude H-H 初始化在 {root}")
+    print(f"  · {'; '.join(parts)}")
+    print("  · 运行 `harness start \"<任务描述>\"` 开始。")
 
 def cmd_start(args: argparse.Namespace) -> None:
     root = Path(args.project) if args.project else Path.cwd()
@@ -291,6 +334,7 @@ def _finish_test(root: Path) -> None:
         print(g4_msg)  # G4 跳过时的友好提示
     state["current_stage"]="done"; state["updated_at"]=_now(); _save(root,state)
     print("Pipeline 完成。")
+    print('💬 这次 H-H 哪里卡到你了？一句话：harness feedback "<痛点>"  （不写也行，下次再说）')
     from claude_hh import hermes_propose; hermes_propose.propose(root)
 
 def cmd_retreat(args: argparse.Namespace) -> None:

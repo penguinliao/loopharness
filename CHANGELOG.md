@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.1.3 — 2026-05-06 (cross-version migration UX)
+
+**Two PM-friendly improvements driven by real-PM dogfooding feedback.**
+
+### `harness init` is now idempotent + auto-cleans v0.3.x residue
+
+Before: each `harness init` blindly appended its 2 hooks to `.claude/settings.json`. Run it 3 times → 3 duplicates. Plus, projects that previously had v0.3.x's 6 hooks (pointing at `harness-engineering/hooks/...`) would end up with both v0.3.x hooks and v1 hooks active, fighting each other.
+
+After:
+- Detects v0.3.x hooks (any `harness-engineering/hooks/...` reference) and **removes them**
+- Detects v1 hooks already present and **skips re-adding** (idempotent)
+- Reports what it did: `清理 N 个 v0.3.x 老 hook; 装 M 个 v1 hook`
+
+This means PMs can run `harness init` in any project (clean / v0.3.x legacy / already-v1) and end up in a known-good single-state.
+
+### Pain-point capture prompts (passive, opt-in)
+
+When pipeline reaches `done`:
+```
+💬 这次 H-H 哪里卡到你了？一句话：harness feedback "<痛点>"  （不写也行，下次再说）
+```
+
+When `retreat` count ≥ 2:
+```
+💬 retreat 多次撞到坑了？一句话：harness feedback "<什么卡住了>"  帮我下次改流程。
+```
+
+PMs don't have to write anything — they just see the prompt at the moments when frustration is freshest. 15-second feedback channel via the existing `harness feedback "..."` command.
+
+### Why these are in v1.x
+
+Both directly serve "let non-technical PMs ship production-grade products" without adding new pipeline stages or new commands. Just better defaults on existing surfaces.
+
+### Upgrade
+
+Drop-in replacement for v1.1.2.
+
+---
+
 ## v1.1.2 — 2026-05-05 (same-day P0 fix + UX)
 
 **Fixes a latent P0 in `cmd_start` that has been silent since v1.0, plus a PM-friendly UX upgrade.**
