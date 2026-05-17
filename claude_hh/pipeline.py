@@ -302,6 +302,10 @@ def cmd_advance(args: argparse.Namespace) -> None:
     root = _require_root(args); state = _load(root); stage = state["current_stage"]
     if stage == "done": print("Pipeline 已完成！"); return
     if stage == "stuck": print("Pipeline 已停滞，请 `harness reset`。"); return
+    if isinstance(stage, int):
+        print(f"检测到 v0.3.x 旧版状态文件 (int stage={stage})。v1.x 不支持自动迁移，"
+              "请运行 `harness reset` 清除后 `harness start` 启新 pipeline。")
+        return
     checks = {
         "spec":(_check_spec,"implement","已进入 IMPLEMENT 阶段。现在可以编辑代码文件。"),
         "implement":(_check_impl,"review","已进入 REVIEW 阶段。请让 AI 写 .harness/review_report.md。"),
