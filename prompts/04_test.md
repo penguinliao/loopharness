@@ -26,6 +26,19 @@ Result:
 - **All exit 0** → pipeline complete. You can stop. ✅
 - **Any test fails** → automatic retreat to IMPLEMENT. The retreat counter increments. You'll go back to IMPLEMENT to fix the code (NOT the tests).
 
+## Black-box test (浊龙) — opt-in
+
+If `.harness/zhuolong_brief.md` exists (you wrote it in SPEC because the task involves UI / user journey), the pipeline will require `.harness/zhuolong_report.md` before advancing to `done`.
+
+**Before running advance**, dispatch the 浊龙 agent using the Agent tool:
+- subagent_type: `zhuolong`
+- model: `opus`
+- prompt: include the full contents of `zhuolong_brief.md` + paths to any test accounts / URLs
+
+When 浊龙 finishes, it writes `.harness/zhuolong_report.md`. Then run advance.
+
+If no `zhuolong_brief.md` exists (most backend / API projects), skip this — pipeline goes directly to done after pytest passes.
+
 ## Retreat budget
 
 You have **3 retreats**. After 3 retreats from IMPLEMENT → REVIEW → TEST → fail, the pipeline stops and waits for the PM. This prevents runaway loops.

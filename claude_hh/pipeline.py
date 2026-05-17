@@ -115,22 +115,34 @@ def _ensure_claude_md(root: Path) -> None:
     # No marker -> append
     md.write_text(existing.rstrip() + chr(10) + chr(10) + CLAUDE_MD_GUIDE)
 
-STAGE_LABELS = {"spec":"SPEC","implement":"IMPLEMENT","review":"REVIEW","test":"TEST","done":"DONE","stuck":"STUCK"}
+STAGE_LABELS = {"spec":"在写规格","implement":"在写代码","review":"在自审","test":"在跑测试","done":"做完了","stuck":"卡住了"}
 PROMPTS = {s: Path(__file__).parent.parent/"prompts"/f"0{i+1}_{s}.md" for i,s in enumerate(["spec","implement","review","test"])}
 NEXT_STEPS = {
-    "spec": "编写 .harness/spec.md（≥3 P0）+ .harness/test_*.py，然后 `harness advance`",
-    "implement": "修改代码文件，然后 `harness advance`",
-    "review": "让 AI 写 .harness/review_report.md（末尾含 PROCEED），然后 `harness advance`",
-    "test": "运行 `harness advance` 跑测试",
-    "done": "Pipeline 已完成",
-    "stuck": "运行 `harness reset` 重新开始，或检查 .harness/stuck_notice.md",
+    "spec": "写清楚什么算做完（规格 + 测试用例）",
+    "implement": "写代码满足规格",
+    "review": "AI 自审 + 独立审查",
+    "test": "跑测试验证",
+    "done": "这次开发已完成",
+    "stuck": "需要你看一下要不要换方向",
 }
 
 def _now() -> str: return datetime.now(timezone.utc).isoformat()
 def _hdir(root: Path) -> Path: d = root/".harness"; d.mkdir(exist_ok=True); return d
 def _pj(root: Path) -> Path: return root/".harness"/"pipeline.json"
 def _load(root: Path) -> dict: return json.loads(_pj(root).read_text())
-def _save(root: Path, s: dict) -> None: _pj(root).write_text(json.dumps(s, indent=2, ensure_ascii=False))
+def _save(root: Path, s: dict) -> None:
+    # Atomic write: tempfile + os.replace (P0 安全审计 — 防并发腐烂状态)
+    import tempfile
+    target = _pj(root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".pipeline.", suffix=".tmp", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(s, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, str(target))
+    except Exception:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 def _find_root(start: "Path|None" = None) -> "Path|None":
     p = (start or Path.cwd()).resolve()
@@ -161,20 +173,185 @@ def _check_spec(root: Path) -> "tuple[bool,str]":
     if not glob.glob(str(root/".harness"/"test_*.py")): return False, "需要至少 1 个 .harness/test_*.py。"
     return True, ""
 
+def _impl_diff_size(root: Path) -> "tuple[int,int] | None":
+    """Return (added_lines, deleted_lines) for .py changes vs HEAD, or None if git unavailable."""
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--shortstat", "HEAD"],
+            cwd=str(root), capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    ins_m = re.search(r"(\d+) insertion", r.stdout)
+    del_m = re.search(r"(\d+) deletion", r.stdout)
+    return (int(ins_m.group(1)) if ins_m else 0, int(del_m.group(1)) if del_m else 0)
+
+
 def _check_impl(root: Path, state: dict) -> "tuple[bool,str]":
+    """Implement check + empty-shell detection (防 feedback_sonnet_empty_delivery):
+    - 至少 1 个 .py 文件 mtime 比 stage 进入时间新（基础检查）
+    - 如果在 git 仓库内：git diff HEAD 的 +/- 行数总和必须 > 0（防只 touch 不改内容）
+    """
     hist = state.get("stage_history", [])
     ts = datetime.fromisoformat(hist[-1]["entered_at"]).timestamp() if hist else 0
+    modified = False
     for py in root.rglob("*.py"):
-        if ".harness" not in py.parts and py.stat().st_mtime > ts: return True, ""
-    return False, "还没有修改任何代码文件（.py）。"
+        if ".harness" not in py.parts and py.stat().st_mtime > ts:
+            modified = True
+            break
+    if not modified:
+        return False, "AI 还没改任何代码"
+    diff_size = _impl_diff_size(root)
+    if diff_size is not None:
+        added, deleted = diff_size
+        if added + deleted == 0:
+            return False, "文件被碰了但内容没真改（看起来是空壳）。让 AI 真写代码再继续"
+        if added + deleted < 3 and not state.get("retreat_count"):
+            # 极小改动 + 第一次进 review：温和提示，不阻塞
+            print(f"  ⚠️  改动量很小（共 {added + deleted} 行）。如果这就是预期就继续。")
+    return True, ""
+
+CROSS_FAMILY_REVIEW_PROMPT = """你是独立代码评审员。审查下方"本期改动"是否有 P0 阻断级问题。
+
+【严格 scope - 必须遵守】
+- 只评审 diff 里的改动，不评审 diff 外的历史代码
+- 看不到完整上下文时说"无法判断 X"，**不能编造** diff 外代码长什么样
+- 不报"未来某种情况可能出现的 P0" - 只报本期 diff 引入的真实回归
+- 不报命名、注释、风格、文档类小问题
+
+【输出格式】
+最后一行必须是这两种之一：
+- PROCEED
+- FAIL: <一句话原因>
+
+【本期规格】
+{spec}
+
+【本期改动 (git diff HEAD)】
+{diff}
+
+【主 Agent 自审结论】
+{review}
+"""
+
+
+def _cross_family_review(root: Path) -> "tuple[bool, str]":
+    """Single-round lightweight cross-family review (替代 G4 的真正价值).
+
+    设计原则（针对 G4 失败的 3 个根因）:
+    - 一轮就出结果，不要 cp=3 折腾
+    - 只送 git diff，不送完整文件（防 scope creep）
+    - prompt 硬规定"看不到的不要编"（防 hallucination）
+    - API 失败 / 未配置 / 输出无法解析 → 静默放行（不阻塞主流程）
+    """
+    try:
+        from claude_hh.antagonist import load_env
+        load_env(str(root))
+    except Exception:
+        pass
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        return True, ""
+
+    spec_path = root / ".harness" / "spec.md"
+    review_path = root / ".harness" / "review_report.md"
+    spec_text = spec_path.read_text()[:5000] if spec_path.exists() else "(无)"
+    review_text = review_path.read_text()[:3000] if review_path.exists() else "(无)"
+
+    try:
+        diff_r = subprocess.run(
+            ["git", "diff", "HEAD"], cwd=str(root),
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        diff_text = diff_r.stdout if diff_r.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.SubprocessError):
+        diff_text = ""
+
+    if not diff_text.strip():
+        return True, ""
+
+    if len(diff_text) > 20000:
+        diff_text = diff_text[:20000] + "\n[diff 已截断]"
+
+    prompt = CROSS_FAMILY_REVIEW_PROMPT.format(
+        spec=spec_text, diff=diff_text, review=review_text,
+    )
+
+    import urllib.request
+    import urllib.error
+    body = json.dumps({
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1500,
+        "temperature": 0,
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.deepseek.com/v1/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    )
+
+    print("  独立审查中...")
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError, TimeoutError) as e:
+        print(f"  (独立审查跳过：API 不可用 - {type(e).__name__})")
+        return True, ""
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        print("  (独立审查跳过：API 返回格式异常)")
+        return True, ""
+
+    last_lines = [ln.strip() for ln in (content or "").strip().splitlines() if ln.strip()]
+    if not last_lines:
+        return True, ""
+    last = last_lines[-1].upper()
+    if last == "PROCEED" or last.endswith("PROCEED"):
+        print("  ✓ 独立审查通过")
+        return True, ""
+    if last.startswith("FAIL"):
+        reason = last_lines[-1].split(":", 1)[-1].split("：", 1)[-1].strip()
+        return False, f"独立审查不通过：{reason or '未给出原因'}"
+    # 无法解析 → 不阻塞
+    print("  (独立审查结果无法解析，按通过处理)")
+    return True, ""
+
 
 def _check_review(root: Path) -> "tuple[bool,str]":
+    """Strict verdict match (P0 安全审计 — 防注释里 PROCEED 绕过):
+    - verdict 必须在文件末段 30 行内（避免 prose 里散落的 PROCEED/FAIL 被当判决）
+    - 屏蔽 ``` 代码块
+    - 用 \\b PROCEED \\b / \\b FAIL \\b 词边界匹配
+    - 末段同时出现两者 → 取最后一个为准
+    + 跨家族独立审查（DeepSeek，配置 DEEPSEEK_API_KEY 启用，未配置静默跳过）
+    """
     rp = root/".harness"/"review_report.md"
-    if not rp.exists(): return False, "review_report.md 不存在（末尾需含 PROCEED）。"
+    if not rp.exists():
+        return False, "AI 还没写自审报告（.harness/review_report.md 缺失）"
     t = rp.read_text()
-    if "FAIL" in t: return False, "review_report.md 含 FAIL，请先修复。"
-    if "PROCEED" not in t: return False, "review_report.md 需包含 PROCEED。"
-    if not _ruff_mypy(root): return False, "ruff/mypy 未通过。"
+    tail = "\n".join(t.splitlines()[-30:])
+    tail_clean = re.sub(r"```.*?```", "", tail, flags=re.DOTALL)
+    last_proceed = -1
+    last_fail = -1
+    for m in re.finditer(r"\bPROCEED\b", tail_clean):
+        last_proceed = m.start()
+    for m in re.finditer(r"\bFAIL\b", tail_clean):
+        last_fail = m.start()
+    if last_fail == -1 and last_proceed == -1:
+        return False, "自审报告末段没看到 PROCEED 或 FAIL 判定"
+    if last_fail > last_proceed:
+        return False, "自审判定不通过，回去修"
+    if not _ruff_mypy(root):
+        return False, "代码风格 / 类型检查没过"
+    # 跨家族独立审查（轻量，未配置 API 静默跳过）
+    cf_ok, cf_msg = _cross_family_review(root)
+    if not cf_ok:
+        return False, cf_msg
     return True, ""
 
 def _check_g4(root: Path) -> "tuple[bool,str]":
@@ -183,6 +360,9 @@ def _check_g4(root: Path) -> "tuple[bool,str]":
     Skipped when DEEPSEEK_API_KEY 未配置（G4 需要至少 2 家 LLM，DeepSeek 是第二家）。
     """
     state_file = root/".harness"/"antagonist_state.json"
+    # 先加载 ~/.harness/.env + 项目 .env，再判断 KEY 是否配置（advance 链路漏调过）
+    from claude_hh.antagonist import load_env
+    load_env(str(root))
     if not os.environ.get("DEEPSEEK_API_KEY"):
         return True, "(G4 跳过: DEEPSEEK_API_KEY 未配置；建议配置后启用跨家族审查)"
     if not state_file.exists():
@@ -197,28 +377,63 @@ def _check_g4(root: Path) -> "tuple[bool,str]":
         return False, f"G4 状态文件读取失败：{e}"
 
 def _run_tests(root: Path) -> "tuple[bool,str]":
+    """Strict test PASS (P0 安全审计 — 堵 skip-only / pytest 缺失 空壳):
+    - 解析 'N passed' 计数，必须 ≥1
+    - exit code 5 (no tests collected) 显式失败
+    - pytest 缺失抛错，不静默放行
+    """
+    import re
     tests = glob.glob(str(root/".harness"/"test_*.py"))
-    if not tests: return False, "没有 .harness/test_*.py。"
+    if not tests:
+        return False, "没找到测试文件（.harness/test_*.py 缺失）"
+    total_passed = 0
     for tf in tests:
-        r = subprocess.run([sys.executable,"-m","pytest",tf,"-v"], timeout=120, cwd=str(root))
-        if r.returncode != 0: return False, f"测试失败：{Path(tf).name}"
-    return True, ""
+        name = Path(tf).name
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pytest", tf, "-v", "--tb=short"],
+                capture_output=True, text=True, timeout=120, cwd=str(root),
+            )
+        except FileNotFoundError as e:
+            return False, f"找不到 pytest，没法跑测试：{e}"
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 5:
+            return False, f"测试文件没有任何用例可跑（可能全是 skip 或空文件）：{name}"
+        if r.returncode != 0:
+            fails = [ln for ln in out.splitlines() if "FAILED" in ln or "ERROR" in ln][:3]
+            tail = "\n".join(fails) if fails else out[-300:]
+            return False, f"测试不通过 {name}:\n{tail}"
+        m = re.search(r"(\d+) passed", out)
+        if not m:
+            return False, f"测试 exit 0 但没找到 'N passed' 计数（pytest 输出异常）：{name}"
+        passed = int(m.group(1))
+        if passed == 0:
+            return False, f"测试没真跑任何用例（可能全是 skip）：{name}"
+        total_passed += passed
+    return True, f"{total_passed} 个测试用例全过"
 
 def _retreat(root: Path, state: dict, reason: str) -> None:
     state["retreat_count"] = n = state.get("retreat_count", 0) + 1
     if n > 3:
         state["current_stage"] = "stuck"
-        (_hdir(root)/"stuck_notice.md").write_text(f"# Pipeline 停滞\n\nretreat {n} 次失败。原因：{reason}\n\n运行 `harness reset` 重新开始。\n")
-        _save(root, state); print("已 retreat 3 次仍失败，详见 .harness/stuck_notice.md"); return
+        (_hdir(root)/"stuck_notice.md").write_text(
+            f"# 卡住了\n\n这次开发回头修了 {n} 次都没过。最后一次没过的原因：\n\n{reason}\n\n"
+            "可能是需求描述不够清楚，或者方向需要调整。\n"
+        )
+        _save(root, state)
+        print(f"修了 {n} 次都没过，我卡住了。最后一次原因：{reason}")
+        print("可能是要换个方向，或者需求描述需要补充。要不要告诉我哪里不对？")
+        return
     state["current_stage"] = "implement"
     state.setdefault("stage_history",[]).append({"stage":"implement","entered_at":_now(),"reason":f"retreat #{n}"})
-    _save(root, state); print(f"retreat 到 IMPLEMENT（第 {n}/3 次）。原因：{reason}  请修复后运行 `harness advance`。")
+    _save(root, state)
+    print(f"这次没通过，回头再修一次（第 {n}/3 次）。原因：{reason}")
     if n >= 2:
-        print('💬 retreat 多次撞到坑了？一句话：harness feedback "<什么卡住了>"  帮我下次改流程。')
+        print('💬 卡了多次了？说一句你觉得哪里不对：harness feedback "..."')
 
 def _require_root(args: argparse.Namespace) -> Path:
     root = _find_root(Path(args.project) if args.project else None)
-    if root is None: print("找不到 pipeline。请先 `harness init` + `harness start`。"); sys.exit(1)
+    if root is None: print("还没有进行中的开发任务。先说一句要做什么再开始。"); sys.exit(1)
     return root
 
 # CLI commands
@@ -290,55 +505,85 @@ def cmd_start(args: argparse.Namespace) -> None:
         is_finished = (stage in ("done","stuck")) or (isinstance(stage,int) and stage >= 6)
         if is_finished:
             pj.unlink()
-            print(f"上一个 pipeline 已 {stage}，自动清理。")
+            print(f"上次任务已 {STAGE_LABELS.get(stage, stage)}，自动清掉。")
         else:
-            print(f"已有进行中的 pipeline (stage={stage})。先做完它，或运行 `harness reset` 抛弃。")
+            label = STAGE_LABELS.get(stage, str(stage))
+            print(f"已经有任务在做（{label}）。先做完它，或者告诉我'清掉重来'。")
             sys.exit(1)
     desc = " ".join(args.desc) if args.desc else "未命名任务"
     _save(root,{"current_stage":"spec","retreat_count":0,"description":desc,"started_at":_now(),"updated_at":_now(),"stage_history":[{"stage":"spec","entered_at":_now()}]})
-    print(f"Pipeline 已启动：{desc}  当前阶段：SPEC"); _prompt("spec"); print("完成后运行 `harness advance`。")
+    print(f'开始做："{desc}"'); _prompt("spec"); print("第一步：写清楚什么算做完（规格 + 测试用例）。")
 
 def cmd_advance(args: argparse.Namespace) -> None:
     root = _require_root(args); state = _load(root); stage = state["current_stage"]
-    if stage == "done": print("Pipeline 已完成！"); return
-    if stage == "stuck": print("Pipeline 已停滞，请 `harness reset`。"); return
+    if stage == "done": print("这次开发已经做完了 ✓"); return
+    if stage == "stuck":
+        print("这次开发卡住了，需要换个方向或者重新开始。要清掉重来吗？"); return
     if isinstance(stage, int):
-        print(f"检测到 v0.3.x 旧版状态文件 (int stage={stage})。v1.x 不支持自动迁移，"
-              "请运行 `harness reset` 清除后 `harness start` 启新 pipeline。")
+        print(f"这是上次没收尾留下的旧记录（旧版格式 stage={stage}）。要清掉重新开始吗？")
         return
     checks = {
-        "spec":(_check_spec,"implement","已进入 IMPLEMENT 阶段。现在可以编辑代码文件。"),
-        "implement":(_check_impl,"review","已进入 REVIEW 阶段。请让 AI 写 .harness/review_report.md。"),
-        "review":(_check_review,"test","已进入 TEST 阶段，开始跑测试…"),
+        "spec":(_check_spec,"implement","规格写好了 ✓ 开始写代码。"),
+        "implement":(_check_impl,"review","代码写完 ✓ 进入自审。"),
+        "review":(_check_review,"test","审查通过 ✓ 跑测试。"),
     }
     if stage in checks:
         fn, nxt, msg = checks[stage]
         ok, err = fn(root, state) if stage=="implement" else fn(root)
         if not ok:
-            print(f"advance 失败：{err}")
-            if stage=="review" and any(kw in err for kw in ("FAIL","ruff","mypy")): _retreat(root,state,err)
+            print(f"还没法继续：{err}")
+            if stage=="review" and any(kw in err for kw in ("FAIL","ruff","mypy","判定不通过","风格","类型")): _retreat(root,state,err)
             return
         state["current_stage"]=nxt; state["stage_history"].append({"stage":nxt,"entered_at":_now()})
         _save(root,state); print(msg); _prompt(nxt)
         if nxt=="test": _finish_test(root)
     elif stage=="test": _finish_test(root)
 
+def _check_zhuolong(root: Path) -> "tuple[bool, str]":
+    """黑盒测试关卡（opt-in，仅当 SPEC 阶段写了 zhuolong_brief.md 才触发）.
+
+    - 没 brief → 跳过（绝大多数 backend/API 项目）
+    - 有 brief 但没 report → 返 False，提示主 Agent 派浊龙
+    - 有 report → 检查最末段判定（PASS/FAIL）
+    """
+    brief = root/".harness"/"zhuolong_brief.md"
+    if not brief.exists():
+        return True, ""  # opt-out by default
+    report = root/".harness"/"zhuolong_report.md"
+    if not report.exists():
+        return False, (
+            "这次有 UI/黑盒测试需求（.harness/zhuolong_brief.md 已写），"
+            "但还没跑过浊龙。让主 Agent 派浊龙跑一遍再继续"
+        )
+    text = report.read_text()
+    tail = "\n".join(text.splitlines()[-50:]).upper()
+    tail_clean = re.sub(r"```.*?```", "", tail, flags=re.DOTALL)
+    has_fail = bool(re.search(r"\b(FAIL|BLOCKED|不通过)\b", tail_clean))
+    has_pass = bool(re.search(r"\b(PASS|通过|可上线)\b", tail_clean))
+    if has_fail and not has_pass:
+        return False, "浊龙黑盒测试报 FAIL，回去修"
+    if not has_pass:
+        return False, "浊龙报告末段没看到 PASS/FAIL 判定"
+    return True, ""
+
+
 def _finish_test(root: Path) -> None:
+    """TEST → done. G4 已从主流程移除（3 个真实 PM 项目 0/38 转化率）。
+    G4 仍可通过 `harness antagonist run` 子命令独立运行。
+    浊龙黑盒测试 opt-in：写 zhuolong_brief.md 才启用。"""
     state = _load(root)
     ok, msg = _run_tests(root)
     state = _load(root)
     if not ok: _retreat(root,state,msg); return
-    print("所有测试通过！")
-    g4_ok, g4_msg = _check_g4(root)
-    if not g4_ok:
-        # G4 未通过：保留在 test 阶段，提示 PM 跑 antagonist
-        print(g4_msg)
-        return
-    if g4_msg:
-        print(g4_msg)  # G4 跳过时的友好提示
+    print(f"测试全过 ✓ {msg}")
+    # 浊龙黑盒测试（opt-in）
+    z_ok, z_msg = _check_zhuolong(root)
+    if not z_ok:
+        print(f"  {z_msg}")
+        return  # 不 retreat，留在 test 阶段等浊龙报告
     state["current_stage"]="done"; state["updated_at"]=_now(); _save(root,state)
-    print("Pipeline 完成。")
-    print('💬 这次 H-H 哪里卡到你了？一句话：harness feedback "<痛点>"  （不写也行，下次再说）')
+    print("这次开发做完了 ✓")
+    print('💬 想说点什么改进的？一句话：harness feedback "..."  （不写也行）')
     from claude_hh import hermes_propose; hermes_propose.propose(root)
 
 def cmd_retreat(args: argparse.Namespace) -> None:
@@ -346,25 +591,25 @@ def cmd_retreat(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     root = _find_root(Path(args.project) if args.project else None)
-    if root is None: print("没有活跃 pipeline。运行 `harness init` + `harness start` 开始。"); return
+    if root is None: print("还没有进行中的开发任务。"); return
     s = _load(root); stage = s["current_stage"]
     desc = s.get("description") or s.get("task_description") or "-"
     rc = s.get("retreat_count", 0)
     st = (s.get("started_at") or "-")[:19]
     # Cross-version compat: v0.3.x writes int stages (1..6), v1.x writes strings.
     if isinstance(stage, int):
-        v03_map = {1:"spec",2:"design",3:"implement",4:"review",5:"test",6:"done"}
-        stage_str = v03_map.get(stage, f"stage{stage}")
-        lbl = STAGE_LABELS.get(stage_str, f"v0.3.x stage {stage}")
-        nxt = NEXT_STEPS.get(stage_str, "(v0.3.x state — 建议 `harness reset` + `harness start` 启新 v1.x pipeline)")
-    else:
-        lbl = STAGE_LABELS.get(stage, stage.upper())
-        nxt = NEXT_STEPS.get(stage, "-")
-    print(f"Pipeline: {desc}  [{lbl}]  retreat:{rc}/3  start:{st}")
-    print(f"  下一步: {nxt}")
+        # 旧版记录不复用新版 label（避免"在跑测试"等假状态误导 PM）
+        print(f'有一份旧版记录（stage={stage}），新版工具看不懂。建议告诉我"清掉重来"。')
+        return
+    lbl = STAGE_LABELS.get(stage, stage)
+    nxt = NEXT_STEPS.get(stage, "-")
+    retreat_note = f"，回头修过 {rc} 次" if rc > 0 else ""
+    print(f'正在做："{desc}"（{lbl}{retreat_note}，{st} 开始）')
+    print(f"  接下来：{nxt}")
 
 def cmd_reset(args: argparse.Namespace) -> None:
-    root = _require_root(args); _pj(root).unlink(missing_ok=True); print("Pipeline 已重置。运行 `harness start` 开始新任务。")
+    root = _require_root(args); _pj(root).unlink(missing_ok=True)
+    print("清掉了。说一句要做什么就开始新任务。")
 
 def cmd_hermes_review(args: argparse.Namespace) -> None:
     from claude_hh import hermes_propose; hermes_propose.interactive_review()
@@ -373,12 +618,12 @@ def cmd_feedback(args: argparse.Namespace) -> None:
     root = _require_root(args)
     text = " ".join(args.text) if args.text else ""
     if not text.strip():
-        print('用法: harness feedback "一句话反馈"'); return
+        print('用法：harness feedback "你想说的话"'); return
     inbox = _hdir(root) / "inbox.md"
     entry = "- [" + _now()[:19] + "] " + text.strip() + chr(10)
     with inbox.open("a") as f:
         f.write(entry)
-    print("✓ 已记录到 .harness/inbox.md。下次 pipeline 完成时会反思。")
+    print("✓ 记下了。下次干完活时会复盘。")
 
 
 def cmd_hermes_show(args: argparse.Namespace) -> None:

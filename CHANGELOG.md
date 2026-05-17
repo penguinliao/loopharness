@@ -1,5 +1,103 @@
 # Changelog
 
+## v1.1.4 — 2026-05-17 (PM-first language + integrity gates)
+
+**Major release driven by full-day first-principles audit of 9 real PM projects.**
+
+### 回归初心：所有 PM 可见字符串改成自然语言
+
+PM 是非技术用户，工程术语（`pipeline / stage-5 / advance / retreat / stuck`）每次撞到他们都是 UX 失败。这版把每条 PM 会看到的输出全部翻译成人话。
+
+**Before**:
+```
+[claude-hh] ⚠️  pipeline 未完成（stage-5），请运行 `harness advance`
+Pipeline 已停滞，请 `harness reset`
+retreat 到 IMPLEMENT（第 2/3 次）。原因：X
+检测到 v0.3.x 旧版状态文件 (int stage=5)...
+```
+
+**After**:
+```
+[claude-hh] 这次开发还没做完（在写代码）。继续做完还是先放一放？
+这次开发卡住了，需要换个方向或者重新开始。要清掉重来吗？
+这次没通过，回头再修一次（第 2/3 次）。原因：X
+这是上次没收尾留下的旧记录。要清掉重新开始吗？
+```
+
+涉及文件：`claude_hh/pipeline.py` (全部 print/error 信息)、`hooks/stop_check.py`（schg-locked 文件，升级需 sudo chflags noschg）。
+
+### `stop_check.py` 新增 4h/24h 闲置感知
+
+不再光看 `current_stage`，还看 `pipeline.json` 的 mtime：
+
+- < 4h：`继续做完还是先放一放？`
+- 4-24h：`暂停了 N.N 小时。要继续做完吗？`
+- > 24h：`已经放了 N 小时没动。可能是上次没收尾留下的，建议清掉重来。`
+
+修复了今天早上撞上的真实痛点：13 天前没收尾的 pipeline 还在喊"请运行 harness advance"。
+
+### G4 跨家族 antagonist 从主流程移除
+
+3 个真实 PM 项目跑 G4 的客观数据：
+- myai: 10 rounds, 27 issues, **0 fixed**
+- 大鹏: 3 rounds, 5 issues, **0 fixed**
+- personal-ai-os: 3 rounds, 6 issues, **0 fixed**
+
+→ 16 rounds / 38 issues / **0/38 真实采纳率**。同时它的失败模式（scope creep + hallucination）反向消耗 inbox.md 这条 PM 反馈通道（7 条 inbox 全是抱怨 G4）。
+
+`_finish_test` 不再调 `_check_g4`。G4 仍保留为可选子命令 `harness antagonist run` 供 power user 使用。
+
+### G4 真正的价值用轻量方式重新接入：`_cross_family_review`
+
+review 阶段，如配 `DEEPSEEK_API_KEY`，自动追派一个 DeepSeek 跨家族独立 reviewer。
+
+关键差异（针对 G4 失败的 3 个根因）：
+- **一轮就出结果**，不是 `cp=3` 状态机折腾
+- **只送 git diff，不送完整文件**（防 scope creep）
+- prompt 硬规定"看不到的不能编"（防 hallucination）
+- API 失败 / 未配置 / 输出无法解析 → 静默放行（不阻塞主流程）
+
+### 4 处底层完整性收紧（防 AI 撒谎）
+
+针对今天早上安全审计发现的 P0 漏洞：
+
+1. **测试 PASS 严格化** (`_run_tests`): 不再只看 pytest exit code，要求 `re.search("N passed", out)` 命中且 N ≥ 1。堵住 pytest exit 5（无测试可跑）和"全是 skip"的空壳。
+2. **`PROCEED/FAIL` 严格匹配** (`_check_review`): 改用末段 30 行 + 词边界 `\bPROCEED\b` / `\bFAIL\b` 双匹配 + 屏蔽 ``` 代码块。堵住注释 / 文档里散落的 PROCEED 关键字绕过判定。
+3. **空壳交付检测** (`_check_impl`): 新增 `_impl_diff_size` 跑 `git diff --shortstat HEAD`。如果 implement 阶段 .py 文件 mtime 比 stage entry 新但 `+/-` 行数总和为 0，判 false（"文件被碰了但内容没真改"）。改动 < 3 行 + 首次 review 时温和提示。
+4. **`pipeline.json` 原子写** (`_save`): 改用 `tempfile.mkstemp` + `os.replace` 模式。防并发 advance / retreat 撞坏 JSON 状态。
+
+### 浊龙黑盒测试 opt-in 嵌入主流程
+
+`_check_zhuolong` 新函数：
+
+- 默认跳过（绝大多数 backend/API 项目）
+- 如果 SPEC 阶段写了 `.harness/zhuolong_brief.md`，TEST 阶段 advance 必须等到 `.harness/zhuolong_report.md` 末段含 PASS/通过/可上线 字样才放行
+- 报 FAIL/BLOCKED/不通过 时阻塞，回头修
+- `prompts/04_test.md` 更新：教主 Agent 在 advance 前派浊龙 subagent
+
+### 数据驱动决策
+
+这版所有改动的依据都来自客观使用数据：
+
+- 9 个项目实际 `.harness/` 目录全盘扫描
+- 13 个项目用 spec.md、25 个用 test_*.py、11 个用 review_report.md、7 个用 proposed_auto.md
+- G4 用了 4 个、PM inbox 反馈用了 2 个（全是 G4 抱怨）
+- 每个组件按"真起作用 vs 摆设"客观判决，不靠工程直觉
+
+### Upgrade path
+
+对已装用户：因为 `~/.claude-hh/hooks/stop_check.py` 是 `schg` 锁文件，升级需要：
+
+```sh
+sudo chflags noschg ~/.claude-hh/hooks/stop_check.py
+cp ~/Desktop/claude-hh-v1/hooks/stop_check.py ~/.claude-hh/hooks/stop_check.py
+sudo chflags schg ~/.claude-hh/hooks/stop_check.py
+```
+
+`pipeline.py` 不锁，直接 `cp` 即可。或者重新 `pip install -e .` 同步。
+
+---
+
 ## v1.1.3 — 2026-05-06 (cross-version migration UX)
 
 **Two PM-friendly improvements driven by real-PM dogfooding feedback.**
