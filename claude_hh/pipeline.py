@@ -189,13 +189,101 @@ def _impl_diff_size(root: Path) -> "tuple[int,int] | None":
     return (int(ins_m.group(1)) if ins_m else 0, int(del_m.group(1)) if del_m else 0)
 
 
+_CODE_SUFFIXES = (".py", ".js", ".ts", ".tsx", ".vue", ".go", ".rs", ".java", ".rb", ".php")
+
+
+def _format_new_file_as_diff(root: Path, rel_path: str) -> str:
+    """把新增的 untracked 文件格式化成 unified diff 片段（让 reviewer 看得见）."""
+    p = root / rel_path
+    if not p.exists() or p.is_dir():
+        return ""
+    if p.suffix not in _CODE_SUFFIXES:
+        return ""
+    try:
+        content = p.read_text(errors="replace")
+    except OSError:
+        return ""
+    # 大文件截断（防超 token）
+    lines = content.splitlines()[:500]
+    body = "\n".join("+" + ln for ln in lines)
+    return f"diff --git a/{rel_path} b/{rel_path}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel_path}\n{body}\n"
+
+
+def _impl_period_diff(root: Path) -> str:
+    """获取本期改动的 diff（给 cross-family reviewer 用）.
+
+    包含：
+    1. tracked 文件的 working tree diff (vs HEAD)
+    2. untracked 新文件的内容（格式化为 +line 片段）
+    3. 如以上都空，回退到 stage 期间 commit 的 -p log
+    """
+    parts: list[str] = []
+    try:
+        # 1. tracked file diff
+        r = subprocess.run(
+            ["git", "diff", "HEAD"], cwd=str(root),
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            parts.append(r.stdout)
+        # 2. untracked new code files (git diff HEAD 不显示未 add 的新文件)
+        r2 = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=str(root), capture_output=True, text=True, timeout=10, check=False,
+        )
+        if r2.returncode == 0:
+            for rel in r2.stdout.splitlines():
+                if rel.startswith(".harness/"):
+                    continue  # 跳过 pipeline 自己的产物
+                frag = _format_new_file_as_diff(root, rel)
+                if frag:
+                    parts.append(frag)
+        if parts:
+            return "\n".join(parts)
+        # 3. fall back to commits made during impl stage
+        state_file = root / ".harness" / "pipeline.json"
+        if not state_file.exists():
+            return ""
+        state = json.loads(state_file.read_text())
+        impl_entry = None
+        for e in state.get("stage_history", []):
+            if e.get("stage") == "implement":
+                impl_entry = e.get("entered_at")
+        if not impl_entry:
+            return ""
+        r3 = subprocess.run(
+            ["git", "log", "-p", f"--since={impl_entry}", "--"],
+            cwd=str(root), capture_output=True, text=True, timeout=30, check=False,
+        )
+        if r3.returncode == 0 and r3.stdout.strip():
+            return r3.stdout
+    except (FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    return ""
+
+
+def _has_commits_since(root: Path, since_iso: str) -> bool:
+    """Returns True if git log shows any commits since `since_iso`."""
+    try:
+        r = subprocess.run(
+            ["git", "log", "--oneline", f"--since={since_iso}"],
+            cwd=str(root), capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+    if r.returncode != 0:
+        return False
+    return bool(r.stdout.strip())
+
+
 def _check_impl(root: Path, state: dict) -> "tuple[bool,str]":
     """Implement check + empty-shell detection (防 feedback_sonnet_empty_delivery):
     - 至少 1 个 .py 文件 mtime 比 stage 进入时间新（基础检查）
-    - 如果在 git 仓库内：git diff HEAD 的 +/- 行数总和必须 > 0（防只 touch 不改内容）
+    - 如果在 git 仓库内：working tree diff == 0 且本 stage 期间也没有 commit → 空壳
     """
     hist = state.get("stage_history", [])
-    ts = datetime.fromisoformat(hist[-1]["entered_at"]).timestamp() if hist else 0
+    stage_entry_iso = hist[-1]["entered_at"] if hist else None
+    ts = datetime.fromisoformat(stage_entry_iso).timestamp() if stage_entry_iso else 0
     modified = False
     for py in root.rglob("*.py"):
         if ".harness" not in py.parts and py.stat().st_mtime > ts:
@@ -206,10 +294,10 @@ def _check_impl(root: Path, state: dict) -> "tuple[bool,str]":
     diff_size = _impl_diff_size(root)
     if diff_size is not None:
         added, deleted = diff_size
-        if added + deleted == 0:
+        committed = _has_commits_since(root, stage_entry_iso) if stage_entry_iso else False
+        if added + deleted == 0 and not committed:
             return False, "文件被碰了但内容没真改（看起来是空壳）。让 AI 真写代码再继续"
-        if added + deleted < 3 and not state.get("retreat_count"):
-            # 极小改动 + 第一次进 review：温和提示，不阻塞
+        if 0 < added + deleted < 3 and not state.get("retreat_count"):
             print(f"  ⚠️  改动量很小（共 {added + deleted} 行）。如果这就是预期就继续。")
     return True, ""
 
@@ -260,15 +348,7 @@ def _cross_family_review(root: Path) -> "tuple[bool, str]":
     spec_text = spec_path.read_text()[:5000] if spec_path.exists() else "(无)"
     review_text = review_path.read_text()[:3000] if review_path.exists() else "(无)"
 
-    try:
-        diff_r = subprocess.run(
-            ["git", "diff", "HEAD"], cwd=str(root),
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-        diff_text = diff_r.stdout if diff_r.returncode == 0 else ""
-    except (FileNotFoundError, subprocess.SubprocessError):
-        diff_text = ""
-
+    diff_text = _impl_period_diff(root)
     if not diff_text.strip():
         return True, ""
 
