@@ -1,2 +1,2 @@
-"""Claude H-H v1.1.3 — spec-first pipeline + G4 cross-family audit."""
-__version__ = "1.1.3"
+"""Claude H-H v1.3.0 — spec-first pipeline + G4 cross-family audit."""
+__version__ = "1.3.0"
