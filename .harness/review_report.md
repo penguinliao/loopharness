@@ -1,36 +1,35 @@
-# Review Report — loop 化升级（v1.2.0）
+# Review Report — Claude 干净上下文二审（自动化双重验证）
 
-## 逐 AC 对照
+## AC coverage
 
-- AC1 错题本落盘：`_append_retreat_log` 在 `_retreat` 计数后立即调用，**先于** n>3 分支，
-  所以普通回炉和最终进 stuck 的那次都会落盘。append 模式不覆盖。✓
-- AC2：prompts/02_implement.md 新增 step 0，明确"你可能是干净上下文"场景。✓
-- AC3/AC4/AC5：`_check_zhuolong` 改三态（pass/wait/fail）。wait（报告缺失/无判定）留在 TEST
-  等报告——这是"还没考"不是"考砸了"，不烧 retreat 预算；fail 且预算未耗尽 → `_retreat`；
-  fail 且 retreat_count>=3 → `_degraded_delivery`（done + delivery_report.md）。✓
-- AC6：`cmd_start` 用与 `_cross_family_review` 完全相同的 `load_env` 加载链（项目 .env +
-  全局 ~/.harness/.env）后查 key，保证提示与真实启用状态一致，不会误报。✓
-- AC7：清残留在"确认是新任务"之后、`_save` 之前执行，进行中任务被拒绝时不会误删。✓
-- AC8/AC9：prompts/01_spec.md Step 3.5 黑盒强制决策；README 无人值守模式（三种结局表）
-  + Hermes 晨报。✓
+| AC | Where | Covered? |
+|----|-------|----------|
+| AC1 PROCEED 通过 | pipeline.py `_fresh_context_review`（末行词匹配与三审同款） | ✅ test_ac1 |
+| AC2 FAIL→"判定不通过"+原因 | 同上，f"二审判定不通过：{reason}" | ✅ test_ac2 |
+| AC3 fail-open（CLI 缺失/超时/非0/无法解析/空输出） | try/except + returncode + 解析兜底，5 种情况单测 | ✅ test_ac3 |
+| AC4 空 diff 跳过不调 claude | 函数开头先查 `_impl_period_diff` | ✅ test_ac4 |
+| AC5 链顺序 自审→静态→二审→三审 + 短路 | `_check_review` 顺序插入，3 种短路场景单测 | ✅ test_ac5 |
+| AC6 跨家族 FAIL 消息含"判定不通过" | 措辞修复 + 注释钉死关键词 | ✅ test_ac6 |
+| AC7/AC8 文档 | prompts/03_review.md 四道门 + README 二审/三审 | ✅ test_ac7_ac8 |
 
-## 自审发现并处理的问题
+## 自审发现并已修的问题（retreat #1，已记错题本）
 
-1. **AC6 测试非密闭**（实现正确，测试漏了全局 ~/.harness/.env 这个变量）→ 按协议走
-   change_request.md 留痕，修测试为 HOME 隔离，断言未放松。详见 CR-1。
-2. **pre_edit hook 防御过度**：`startswith("test_")` 连协议要求的 test_bug_report.md
-   都拦。修为 `and name.endswith(".py")`，与报错文案语义一致。已确认 `_run_tests` 只
-   glob `test_*.py`，放行 .md 不会让任何门禁读到假测试。详见 CR-2。
-3. **repo 缺自己的 ruff 基线**：不配置则向上继承外层仓库严格规则，REVIEW 门禁在自家
-   代码上必挂（95 个存量风格错）。补 [tool.ruff] 匹配既有压缩风格；我本次新增的代码
-   在严格规则下也是 0 错误。版本号 1.1.3（已落后于 CHANGELOG）对齐为 1.2.0。
+初版 `claude -p` 继承项目 cwd → 二审进程会加载被审项目自己的 `.claude/settings.json`
+hooks，stop_check 会拦它收工 → 系统性 180s 超时。已修：`cwd=tempfile.gettempdir()`。
+副作用是正收益：审查者物理上读不到仓库，"只看 diff 不许编"从软规则变硬约束。
 
-## 风险检查
+## Three honest answers
 
-- 带病交付只可能由黑盒（浊龙）失败触发；自家 AC 测试失败耗尽预算仍走 stuck——
-  `_finish_test` 中 `_run_tests` 失败直接 `_retreat`，与浊龙分支互斥，无绕过路径。
-- delivery_report.md / retreat_log.md 内容来自测试失败摘要与浊龙报告，无密钥类敏感信息。
-- `cmd_start` 的 key 提示 fail-open（load_env 异常只跳过提示），不会阻塞开工。
-- 测试验证：12/12 通过；ruff All checks passed。
+1. **最丑的地方**：`_fresh_context_review` 与 `_cross_family_review` 有约 15 行同构的
+   裁剪/解析逻辑。刻意不抽象——两者失败语义和 IO 通道完全不同（subprocess vs urllib），
+   提前抽公共层会让 fail-open 路径变绕。两处出现，按三次法则还不到抽的时机。
+2. **生产最可能的失败模式**：claude -p 慢（最坏 +3 分钟/次 advance）或用户 CLI 未登录
+   （returncode != 0）。两者都 fail-open 放行，不阻塞，仅损失这道质检。
+3. **spec 不支持的代码**：无。import tempfile 放函数内是为了不动文件顶部 import 行
+   （最小 diff）。
+
+## Scope check
+
+改动文件 = spec 影响清单（pipeline.py / 03_review.md / README.md），无越权。
 
 PROCEED

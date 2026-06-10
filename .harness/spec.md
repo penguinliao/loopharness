@@ -1,51 +1,44 @@
-# loop 化升级：retreat 错题本 + 浊龙回炉带病交付 + 无人值守模式
+# REVIEW 新增 Claude 干净上下文二审（自动化双重验证）
 
 ## 背景
 
-对照 2026 loop 理念（官方 /loop 自驱异步 agent + Ralph Wiggum "进度沉淀在文件不在上下文"）：
-v1.1.4 的 pipeline 已具备文件化状态机和 integrity gates，但有三个缺口：
+PM 一直手动做"双重验证"：开新 Claude Code 对话贴提示词独立审查交付代码。其独特价值 =
+**最强工程审查能力（Claude）× 全新上下文（不知道代码怎么写出来的，无自我说服偏误）**。
+本任务把它自动化进 REVIEW 阶段，loop 无人值守时也能享受这道质检。
 
-1. retreat 原因只 print 到屏幕，不落盘 → 干净上下文的下一轮看不到上次失败教训（盲改）
-2. 浊龙黑盒报 FAIL 只打印提示、原地干等 → 无人值守 loop 下死等到天亮
-3. 黑盒默认静默跳过、独立审查未配置时无感 → PM 以为有质检实际没有
-
-PM 拍板的设计：浊龙 FAIL 自动回炉修（≤3 轮）；修不过不挂起，**带病交付**（done +
-诚实的交付报告），上不上线由 PM 看报告决定。永不卡死，最终必有交付物。
+设计红线（G4 的 0/38 采纳率教训，照搬 v1.1.4 救活跨家族审查的约束）：
+一轮出结果、只看 diff、看不到的不许编、fail-open 不阻塞主流程。
 
 ## Acceptance criteria
 
 | # | Criterion | Priority |
 |---|-----------|----------|
-| AC1 | `_retreat` 每次触发时，把（UTC 时间戳 + 第 N 次 + 完整原因）**追加**写入 `.harness/retreat_log.md`；连续 2 次 retreat 后两条原因都在文件里（append-only，不覆盖） | P0 |
-| AC2 | `prompts/02_implement.md` 明确指示：IMPLEMENT 开始前先读 `.harness/retreat_log.md`（如存在），针对上几轮失败原因修，不要盲改 | P0 |
-| AC3 | TEST 阶段浊龙报 FAIL 且 retreat_count < 3 时，`_finish_test` 自动调用 `_retreat` 回 IMPLEMENT（stage 变 implement、retreat_count +1），不再原地干等 | P0 |
-| AC4 | 浊龙报 FAIL 且 retreat_count >= 3 时：**带病交付** — stage 置 `done`，写 `.harness/delivery_report.md`（必须含"遗留问题"字样 + 浊龙失败原因），打印诚实提示；不进 stuck、不挂起 | P0 |
-| AC5 | 浊龙报 PASS（或无 brief 跳过）时：正常 done，**不**产生 delivery_report.md | P0 |
-| AC6 | `harness start` 时若 DEEPSEEK_API_KEY 未配置（环境变量和项目 .env 都没有），打印一行提醒"跨家族独立审查未启用"；已配置则不打印 | P0 |
-| AC7 | `harness start` 启动新任务时，清掉上个任务残留的 `retreat_log.md` 和 `delivery_report.md`（防止上个任务的错题本污染新任务） | P0 |
-| AC8 | `prompts/01_spec.md` 新增黑盒测试强制决策：spec.md 必须写"黑盒测试"段落——要么启用（SPEC 阶段写 zhuolong_brief.md），要么写明"不需要 + 理由"；不允许静默跳过 | P1 |
-| AC9 | README.md 新增"无人值守模式"章节（教 PM 用 /loop 一句话驱动 pipeline 到交付，含 done/stuck/带病交付三种结局说明）+ "Hermes 晨报"定时消化 inbox 的模板 | P1 |
+| AC1 | 新增 `_fresh_context_review(root)`：调 `claude -p`（干净上下文单次调用），prompt 含 spec + 本期 diff + 与跨家族审查相同的严格 scope 规则；输出末行 PROCEED → 返回通过 | P0 |
+| AC2 | claude 输出末行 `FAIL: <原因>` → 返回 (False, msg)，msg 含"判定不通过"和原因文本（"判定不通过"是 cmd_advance 自动回炉的触发关键词，原因会进错题本） | P0 |
+| AC3 | fail-open：claude CLI 不存在 / 超时 / 退出码非 0 / 输出无法解析或为空 → 一律放行 (True,"")，不阻塞 pipeline | P0 |
+| AC4 | 本期 diff 为空 → 跳过二审且**不调用** claude（没东西可审，省额度） | P0 |
+| AC5 | `_check_review` 检查顺序：自审判定 → ruff/mypy → 二审 → 跨家族三审。前面任何一道不过，后面的**不执行**（静态检查能拦的问题不烧 LLM 额度） | P0 |
+| AC6 | 修存量 bug：`_cross_family_review` 的 FAIL 消息从"独立审查不通过"改为含"判定不通过"——否则 cmd_advance 关键词匹配不到，FAIL 后卡在 REVIEW 阶段无法自动回炉（REVIEW 阶段 hook 锁代码，卡住=死局） | P0 |
+| AC7 | prompts/03_review.md 说明二审机制（advance 时自动发生、FAIL 自动回炉、错题本衔接） | P1 |
+| AC8 | README 无人值守章节更新：三个互相不通气的审查者（自审之外：静态检查 + Claude 二审 + DeepSeek 三审） | P1 |
 
 ## Affected files
 
 | File | Change |
 |------|--------|
-| claude_hh/pipeline.py | `_retreat` 写 retreat_log.md；`_finish_test` 浊龙 FAIL 分支接回炉/带病交付；`cmd_start` 加 key 提醒 + 清残留文件 |
-| prompts/02_implement.md | 加"先读错题本"指示 |
-| prompts/01_spec.md | 加黑盒测试强制决策要求 |
-| prompts/04_test.md | 更新浊龙 FAIL 的处理说明（自动回炉/带病交付） |
-| README.md | 无人值守模式 + Hermes 晨报章节 |
+| claude_hh/pipeline.py | 新增 `_fresh_context_review`；`_check_review` 插入二审调用；`_cross_family_review` FAIL 消息措辞修复 |
+| prompts/03_review.md | 二审机制说明 |
+| README.md | 无人值守章节更新 |
 
 ## Out of scope
 
-- 不自己写 scheduler/daemon/watch 进程（用 Claude Code 原生 /loop 和 cron）
-- 不改 retreat 3 次上限（防 AI 无限瞎折腾的刹车保留）
-- 测试脚本（test_*.py）失败 3 次仍进 stuck 不带病交付——自家 AC 测试不过的代码不能交付；带病交付仅限黑盒（浊龙）失败
-- 不复活 G4 状态机
-- _check_spec 不对黑盒段落做硬拦截（prompt 层约束，避免破坏存量项目兼容）
+- 不做多轮二审状态机（G4 教训）
+- 不给二审加独立配置开关（claude CLI 缺失即自然跳过；本工具本来就要求 Claude Code 环境）
+- 不改 DeepSeek 跨家族审查的调用方式
+- 二审用什么模型由用户的 claude CLI 默认配置决定，不硬编码 model 参数
 
 ## 测试策略
 
-- 全部白盒单元/集成测试（tempfile 隔离的假项目 + 直调 pipeline 函数 + subprocess 跑真 CLI）
-- 本任务是 CLI 工具自身改造，无 UI，黑盒浊龙不适用。理由：被测对象就是 pipeline 状态机本身，
-  测试脚本直接驱动真实 CLI 入口（subprocess python -m claude_hh.pipeline）已覆盖用户可见行为
+白盒单元/集成测试（monkeypatch subprocess 与内部函数，tempfile 隔离假项目）。
+黑盒浊龙不适用：被测对象是 pipeline 内部审查链，无 UI；测试直接驱动真实函数已覆盖
+用户可见行为（advance 输出与回炉行为）。

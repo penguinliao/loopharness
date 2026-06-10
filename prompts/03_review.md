@@ -48,9 +48,21 @@ If your verdict is **PROCEED**, run:
 python3 -m claude_hh.pipeline advance
 ```
 
-The advance check will run `ruff check` and `mypy` automatically. If those fail, advance refuses and you go back to IMPLEMENT (retreat).
+The advance check runs four gates in order (any failure stops the chain — later gates don't run):
+
+1. **Your verdict** — report must end with a real PROCEED
+2. **ruff + mypy** — static checks
+3. **二审（Claude 干净上下文）** — the pipeline calls `claude -p` with the spec + this period's
+   diff. The reviewer is a fresh context that has NO idea how the code was written — no
+   self-confirmation bias. It follows the same strict rules as the cross-family review
+   (diff-only, no inventing, one round). FAIL → automatic retreat to IMPLEMENT, reason goes
+   into `.harness/retreat_log.md`（错题本）. CLI unavailable / timeout → silently skipped.
+4. **三审（DeepSeek 跨家族）** — only if `DEEPSEEK_API_KEY` is configured
 
 If your verdict is **FAIL**, you also run advance — and the system will retreat you to IMPLEMENT to fix what you found. This is by design: REVIEW catches your own mistakes before TEST does.
+
+二审/三审报 FAIL 时同样自动回炉——你回到 IMPLEMENT 后先读错题本里它们给出的原因，
+针对修。不要试图说服自己"审查者错了"然后原样重交：同样的 diff 会得到同样的 FAIL。
 
 ## Why REVIEW exists
 

@@ -396,9 +396,58 @@ def _cross_family_review(root: Path) -> "tuple[bool, str]":
         return True, ""
     if last.startswith("FAIL"):
         reason = last_lines[-1].split(":", 1)[-1].split("：", 1)[-1].strip()
-        return False, f"独立审查不通过：{reason or '未给出原因'}"
+        # "判定不通过"是 cmd_advance 自动回炉的触发关键词，措辞不能改
+        return False, f"独立审查判定不通过：{reason or '未给出原因'}"
     # 无法解析 → 不阻塞
     print("  (独立审查结果无法解析，按通过处理)")
+    return True, ""
+
+
+def _fresh_context_review(root: Path) -> "tuple[bool, str]":
+    """Claude 干净上下文二审（自动化的"双重验证"）.
+
+    同家族但全新上下文（claude -p 单次调用）——审查者不知道代码是怎么写出来的，
+    没有"我写的肯定对"的自我说服。约束照搬跨家族审查（G4 0/38 教训）：
+    一轮出结果、只看 diff、看不到的不许编、fail-open 不阻塞主流程。
+    """
+    diff_text = _impl_period_diff(root)
+    if not diff_text.strip():
+        return True, ""  # 没东西可审，不烧额度
+    if len(diff_text) > 20000:
+        diff_text = diff_text[:20000] + "\n[diff 已截断]"
+    spec_path = root / ".harness" / "spec.md"
+    review_path = root / ".harness" / "review_report.md"
+    spec_text = spec_path.read_text()[:5000] if spec_path.exists() else "(无)"
+    review_text = review_path.read_text()[:3000] if review_path.exists() else "(无)"
+    prompt = CROSS_FAMILY_REVIEW_PROMPT.format(spec=spec_text, diff=diff_text, review=review_text)
+
+    print("  二审中（Claude 干净上下文）...")
+    try:
+        # cwd 必须是中立目录：(1) 防止二审进程加载被审项目自己的 hooks
+        # （stop_check 会拦它收工导致 180s 超时）；(2) 物理隔离——审查者
+        # 只能看 prompt 里的 diff，读不到仓库，"看不到的不许编"从软规则变硬约束
+        import tempfile
+        r = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True, text=True, timeout=180, cwd=tempfile.gettempdir(),
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        print("  (二审跳过：claude CLI 不可用)")
+        return True, ""
+    if r.returncode != 0:
+        print("  (二审跳过：claude CLI 返回错误)")
+        return True, ""
+    last_lines = [ln.strip() for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+    if not last_lines:
+        return True, ""
+    last = last_lines[-1].upper()
+    if last == "PROCEED" or last.endswith("PROCEED"):
+        print("  ✓ 二审通过")
+        return True, ""
+    if last.startswith("FAIL"):
+        reason = last_lines[-1].split(":", 1)[-1].split("：", 1)[-1].strip()
+        return False, f"二审判定不通过：{reason or '未给出原因'}"
+    print("  (二审结果无法解析，按通过处理)")
     return True, ""
 
 
@@ -428,7 +477,11 @@ def _check_review(root: Path) -> "tuple[bool,str]":
         return False, "自审判定不通过，回去修"
     if not _ruff_mypy(root):
         return False, "代码风格 / 类型检查没过"
-    # 跨家族独立审查（轻量，未配置 API 静默跳过）
+    # 二审：Claude 干净上下文（静态检查之后才烧 LLM 额度；FAIL 短路三审）
+    fr_ok, fr_msg = _fresh_context_review(root)
+    if not fr_ok:
+        return False, fr_msg
+    # 三审：跨家族独立审查（轻量，未配置 API 静默跳过）
     cf_ok, cf_msg = _cross_family_review(root)
     if not cf_ok:
         return False, cf_msg
