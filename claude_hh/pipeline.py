@@ -492,8 +492,18 @@ def _run_tests(root: Path) -> "tuple[bool,str]":
         total_passed += passed
     return True, f"{total_passed} 个测试用例全过"
 
+def _append_retreat_log(root: Path, n: int, reason: str) -> None:
+    """错题本：每次 retreat 的原因落盘，下一轮（哪怕是干净上下文）先读再修."""
+    log = _hdir(root) / "retreat_log.md"
+    if not log.exists():
+        log.write_text("# 错题本\n\n每轮没通过的原因。修之前先读，针对原因修，不要盲改。\n\n")
+    with log.open("a") as f:
+        f.write(f"## 第 {n} 次没过 — {_now()[:19]}\n\n{reason}\n\n")
+
+
 def _retreat(root: Path, state: dict, reason: str) -> None:
     state["retreat_count"] = n = state.get("retreat_count", 0) + 1
+    _append_retreat_log(root, n, reason)
     if n > 3:
         state["current_stage"] = "stuck"
         (_hdir(root)/"stuck_notice.md").write_text(
@@ -590,9 +600,21 @@ def cmd_start(args: argparse.Namespace) -> None:
             label = STAGE_LABELS.get(stage, str(stage))
             print(f"已经有任务在做（{label}）。先做完它，或者告诉我'清掉重来'。")
             sys.exit(1)
+    # 清掉上个任务的残留（错题本/交付报告属于上个任务，留着会污染新任务）
+    for residue in ("retreat_log.md", "delivery_report.md"):
+        (root / ".harness" / residue).unlink(missing_ok=True)
     desc = " ".join(args.desc) if args.desc else "未命名任务"
     _save(root,{"current_stage":"spec","retreat_count":0,"description":desc,"started_at":_now(),"updated_at":_now(),"stage_history":[{"stage":"spec","entered_at":_now()}]})
-    print(f'开始做："{desc}"'); _prompt("spec"); print("第一步：写清楚什么算做完（规格 + 测试用例）。")
+    print(f'开始做："{desc}"')
+    # 独立审查可用性提示（只提醒不阻塞——PM 该知道质检员到底在不在岗）
+    try:
+        from claude_hh.antagonist import load_env
+        load_env(str(root))
+    except Exception:  # noqa: BLE001 — 提示性检查，加载失败不阻塞开工
+        pass
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        print("ℹ️  跨家族独立审查未启用（没配 DEEPSEEK_API_KEY）。审查将只有 AI 自审 + 静态检查。")
+    _prompt("spec"); print("第一步：写清楚什么算做完（规格 + 测试用例）。")
 
 def cmd_advance(args: argparse.Namespace) -> None:
     root = _require_root(args); state = _load(root); stage = state["current_stage"]
@@ -619,19 +641,20 @@ def cmd_advance(args: argparse.Namespace) -> None:
         if nxt=="test": _finish_test(root)
     elif stage=="test": _finish_test(root)
 
-def _check_zhuolong(root: Path) -> "tuple[bool, str]":
+def _check_zhuolong(root: Path) -> "tuple[str, str]":
     """黑盒测试关卡（opt-in，仅当 SPEC 阶段写了 zhuolong_brief.md 才触发）.
 
-    - 没 brief → 跳过（绝大多数 backend/API 项目）
-    - 有 brief 但没 report → 返 False，提示主 Agent 派浊龙
-    - 有 report → 检查最末段判定（PASS/FAIL）
+    返回 (status, msg)，status 三态：
+    - "pass" → 没 brief（跳过）或报告判定通过
+    - "wait" → 有 brief 但报告缺失/没判定 → 留在 TEST 阶段等报告
+    - "fail" → 报告判定 FAIL → 自动回炉（或预算耗尽时带病交付）
     """
     brief = root/".harness"/"zhuolong_brief.md"
     if not brief.exists():
-        return True, ""  # opt-out by default
+        return "pass", ""  # opt-out by default
     report = root/".harness"/"zhuolong_report.md"
     if not report.exists():
-        return False, (
+        return "wait", (
             "这次有 UI/黑盒测试需求（.harness/zhuolong_brief.md 已写），"
             "但还没跑过浊龙。让主 Agent 派浊龙跑一遍再继续"
         )
@@ -641,26 +664,61 @@ def _check_zhuolong(root: Path) -> "tuple[bool, str]":
     has_fail = bool(re.search(r"\b(FAIL|BLOCKED|不通过)\b", tail_clean))
     has_pass = bool(re.search(r"\b(PASS|通过|可上线)\b", tail_clean))
     if has_fail and not has_pass:
-        return False, "浊龙黑盒测试报 FAIL，回去修"
+        return "fail", "浊龙黑盒测试报 FAIL，回去修"
     if not has_pass:
-        return False, "浊龙报告末段没看到 PASS/FAIL 判定"
-    return True, ""
+        return "wait", "浊龙报告末段没看到 PASS/FAIL 判定"
+    return "pass", ""
+
+
+def _degraded_delivery(root: Path, state: dict, reason: str) -> None:
+    """带病交付：自动测试全过但黑盒修满预算仍没过 → 照样交付 + 诚实的交付报告.
+
+    PM 决策（2026-06-10）：永不挂起，最终必有交付物；上不上线由 PM 看报告决定。
+    """
+    log = _hdir(root) / "retreat_log.md"
+    history = log.read_text() if log.exists() else "（无记录）"
+    rc = state.get("retreat_count", 0)
+    (_hdir(root) / "delivery_report.md").write_text(
+        "# 交付报告：已交付，有遗留问题 ⚠️\n\n"
+        f"功能代码的自动测试全部通过，但浊龙黑盒测试修了 {rc} 轮仍没过。\n"
+        "按约定不再挂起，照常交付，由你决定要不要上线。\n\n"
+        f"## 遗留问题（上线前请你确认）\n\n{reason}\n\n"
+        "浊龙最近一次完整报告：`.harness/zhuolong_report.md`\n\n"
+        f"## 修复尝试记录（错题本）\n\n{history}\n"
+    )
+    state["current_stage"] = "done"
+    state["updated_at"] = _now()
+    state.setdefault("stage_history", []).append(
+        {"stage": "done", "entered_at": _now(), "reason": "degraded-delivery"}
+    )
+    _save(root, state)
+    print("这次开发做完了，但有遗留问题 ⚠️")
+    print(f"  黑盒测试修了 {rc} 轮还有没过的项。详情看 .harness/delivery_report.md，上线前请你确认。")
+    from claude_hh import hermes_propose
+    hermes_propose.propose(root)
 
 
 def _finish_test(root: Path) -> None:
     """TEST → done. G4 已从主流程移除（3 个真实 PM 项目 0/38 转化率）。
     G4 仍可通过 `harness antagonist run` 子命令独立运行。
-    浊龙黑盒测试 opt-in：写 zhuolong_brief.md 才启用。"""
+    浊龙黑盒测试 opt-in：写 zhuolong_brief.md 才启用。
+    浊龙 FAIL → 自动回炉（≤3 轮）；预算耗尽 → 带病交付，永不挂起。"""
     state = _load(root)
     ok, msg = _run_tests(root)
     state = _load(root)
     if not ok: _retreat(root,state,msg); return
     print(f"测试全过 ✓ {msg}")
     # 浊龙黑盒测试（opt-in）
-    z_ok, z_msg = _check_zhuolong(root)
-    if not z_ok:
+    z_status, z_msg = _check_zhuolong(root)
+    if z_status == "wait":
         print(f"  {z_msg}")
-        return  # 不 retreat，留在 test 阶段等浊龙报告
+        return  # 报告还没产出，留在 test 阶段等浊龙
+    if z_status == "fail":
+        if state.get("retreat_count", 0) >= 3:
+            _degraded_delivery(root, state, z_msg)
+            return
+        _retreat(root, state, z_msg)
+        return
     state["current_stage"]="done"; state["updated_at"]=_now(); _save(root,state)
     print("这次开发做完了 ✓")
     print('💬 想说点什么改进的？一句话：harness feedback "..."  （不写也行）')

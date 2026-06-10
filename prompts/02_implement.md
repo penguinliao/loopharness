@@ -12,6 +12,9 @@ If you discover the spec is wrong (truly impossible to satisfy, or self-contradi
 
 ## What to do
 
+0. **If `.harness/retreat_log.md` exists, read it FIRST.** 这是错题本——上几轮没通过的
+   原因都记在里面（你可能是干净上下文，对之前的失败毫无记忆）。针对原因修，不要盲改，
+   不要重复上一轮已经失败过的改法。
 1. Re-read `.harness/spec.md` once. Note each P0 AC.
 2. Open `.harness/test_*.py` and skim what's tested. Run them once now to see them fail (they should — you haven't implemented anything yet):
    ```

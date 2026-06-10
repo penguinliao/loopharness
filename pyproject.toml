@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-hh"
-version = "1.1.3"
+version = "1.2.0"
 description = "Spec-first pipeline for Claude Code with G4 cross-family audit. 300 lines core + ~1500 lines for the optional G4 gate."
 readme = "README.md"
 license = { text = "MIT" }
@@ -17,3 +17,14 @@ harness = "claude_hh.pipeline:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["claude_hh*"]
+
+# 本仓库自己的 lint 基线（不配则 ruff 会向上继承别的仓库的严格配置，
+# 让 REVIEW 门禁在自家代码上必挂——吃狗粮的前提是门禁能跑通自己）
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+# E701/E702/E401: 本代码库刻意的压缩单行风格; E501: 中文文档字符串常超长
+ignore = ["E401", "E501", "E701", "E702", "E731", "E741"]

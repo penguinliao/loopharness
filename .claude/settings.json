@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/lkk/Desktop/app/harness-engineering/claude-hh-v1/hooks/pre_edit.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/lkk/Desktop/app/harness-engineering/claude-hh-v1/hooks/stop_check.py"
+          }
+        ]
+      }
+    ]
+  }
+}

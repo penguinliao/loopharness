@@ -32,7 +32,8 @@ def main() -> None:
 
     if in_harness:
         name = file_path.name
-        if (name == "spec.md" or name.startswith("test_")) and stage != "spec":
+        # 只锁 spec.md 和 test_*.py 测试脚本；test_bug_report.md 等 .md 上报通道必须放行
+        if (name == "spec.md" or (name.startswith("test_") and name.endswith(".py"))) and stage != "spec":
             _block(f"spec.md/test_*.py 只在 SPEC 阶段可编辑（当前：{stage.upper()}）。")
         sys.exit(0)
 

@@ -85,6 +85,17 @@ Tests must:
 
 You will not be allowed to modify these tests in IMPLEMENT stage. Write them carefully now.
 
+## Step 3.5: 黑盒测试决策（必须二选一，不允许静默跳过）
+
+spec.md 里必须有一个「测试策略」或「黑盒测试」小节，明确写下其中之一：
+
+- **启用**：任务涉及 UI / 用户旅程 / 端到端体验 → 同时写 `.harness/zhuolong_brief.md`
+  （场景要写到最终预期结果，如"用户搜 john → 列表出现 johnny 和 johnson"）。
+  TEST 阶段会强制等浊龙黑盒报告，FAIL 自动回炉修。
+- **不需要**：写明理由（如"纯后端 CLI/API，测试脚本已直接覆盖用户可见行为"）。
+
+不写这个决策段落 = 你在替 PM 默默放弃一道质检，这不是你的权力。
+
 ## Step 4: Advance
 
 Once spec.md and at least one test_*.py file exist, run:

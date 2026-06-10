@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.2.0 — 2026-06-10 (loop 化：错题本 + 浊龙回炉带病交付 + 无人值守模式)
+
+**设计来源**：2026 loop 理念（官方 /loop 自驱异步 agent + Ralph Wiggum "进度沉淀在文件不在上下文"）。
+pipeline 状态机天生支持无状态重入，这版补齐了 loop 化缺的两块：记忆落盘 + 永不挂起。
+
+### 错题本（retreat_log.md）
+
+每次 retreat 的原因自动追加落盘到 `.harness/retreat_log.md`（append-only，含 stuck 那次）。
+`prompts/02_implement.md` 新增 step 0：开工前先读错题本——下一轮哪怕是干净上下文的 AI
+也知道上几轮为什么没过，不盲改、不重复失败过的改法。
+
+### 浊龙 FAIL 自动回炉 + 带病交付（PM 决策：永不挂起，最终必有交付物）
+
+`_check_zhuolong` 改三态：
+- **wait**（报告缺失/无判定）→ 留在 TEST 等报告，不烧 retreat 预算
+- **fail** 且 retreat_count < 3 → 自动 `_retreat` 回 IMPLEMENT（v1.1.4 是原地干等，无人值守下死等到天亮）
+- **fail** 且预算耗尽 → **带病交付**：照常 done + `.harness/delivery_report.md` 诚实列出遗留问题，
+  上不上线 PM 看报告决定
+
+自家 AC 测试失败耗尽预算仍走 stuck——带病交付仅限黑盒失败，spec 验收不过的代码绝不交付。
+
+### start 时的两道诚实检查
+
+- 未配 DEEPSEEK_API_KEY（环境 + 项目/全局 .env 都没有）→ 提示"跨家族独立审查未启用"，
+  PM 该知道质检员到底在不在岗
+- 自动清掉上个任务残留的 retreat_log.md / delivery_report.md，防污染新任务
+
+### SPEC 黑盒强制决策
+
+`prompts/01_spec.md` Step 3.5：spec 必须显式二选一——启用黑盒（写 zhuolong_brief.md）或
+写明不需要的理由。不允许 AI 替 PM 默默放弃一道质检。
+
+### 无人值守模式文档（README）
+
+PM 晚上一句 `/loop 把这个功能做完，做完或卡住叫我`，醒来只有三种结局：
+done ✓ / done ⚠️（带病交付，读 delivery_report）/ stuck（读卡住说明）。
+附 Hermes 晨报模板（定时消化 inbox → 早晨 30 秒 y/n 审核）。不自己写 scheduler——
+Claude Code 原生 /loop 和定时任务就是驱动器。
+
+### 修复
+
+- `hooks/pre_edit.py` 防御过度：`startswith("test_")` 把协议要求 AI 写的
+  `test_bug_report.md`（.md 上报通道）也物理拦截了。修为只锁 `test_*.py`，与报错文案一致
+- `pyproject.toml` 补本仓库自己的 ruff 基线（不配则向上继承外层仓库严格规则，REVIEW
+  门禁在自家代码上必挂 95 个存量风格错）；版本号 1.1.3 → 1.2.0 对齐 CHANGELOG
+
+### 吃狗粮记录
+
+本版全程走自家 pipeline（SPEC→IMPLEMENT→REVIEW→TEST，12/12 AC 测试通过）。过程中
+被自己的 pre_edit hook 物理拦截 1 次（发现上述防御过度 bug）、发现 AC6 测试非密闭
+1 次（按 04_test.md 协议走 change_request.md 留痕修复，断言未放松）。
+
 ## v1.1.4 — 2026-05-17 (PM-first language + integrity gates)
 
 **Major release driven by full-day first-principles audit of 9 real PM projects.**
