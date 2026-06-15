@@ -2,7 +2,14 @@
 from __future__ import annotations
 import argparse, glob, json, os, re, subprocess, sys, textwrap
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
+
+from claude_hh.antagonist import SIMILARITY_THRESHOLD
+
+# 连续 N 次失败原因相似 → 判定「原地打转」提前 stuck（loop engineering 护栏③：无进展检测，
+# 原文即"两轮无变化即退出"）。复用 antagonist 的 SIMILARITY_THRESHOLD，不另造阈值数字。
+SAME_REASON_LIMIT = 2
 
 CLAUDE_MD_GUIDE = """\
 <!-- claude-hh:auto-start-guide v1.0.6 -->
@@ -554,23 +561,86 @@ def _append_retreat_log(root: Path, n: int, reason: str) -> None:
         f.write(f"## 第 {n} 次没过 — {_now()[:19]}\n\n{reason}\n\n")
 
 
+def _reason_similar(a: str, b: str) -> bool:
+    """两次 retreat 失败原因是否「同一个问题」—— 复用 antagonist 的 SequenceMatcher + 阈值。
+
+    与 antagonist._issues_similar 同核（difflib.SequenceMatcher + SIMILARITY_THRESHOLD），
+    但 retreat 原因没有「文件」维度，故只比文本。除对称 ratio 外，再加一道容差：
+    一次失败的原因常是上一次的「核心 + 追加说明」，用最长公共连续块占较短原因的比例兜底，
+    避免「同一问题多写两句」被字符级 ratio 因长度差拉低而漏判。两道都用 0.85 同一阈值。
+    """
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
+        return False
+    sm = SequenceMatcher(None, a, b)
+    if sm.ratio() > SIMILARITY_THRESHOLD:
+        return True
+    short_len = min(len(a), len(b))
+    block = sm.find_longest_match(0, len(a), 0, len(b)).size
+    return short_len > 0 and block / short_len > SIMILARITY_THRESHOLD
+
+
+def _retreat_briefing(root: Path, n: int = 3) -> str:
+    """错题本提要：返回最近 n 次 retreat 失败原因，供物理注入（回炉输出 / pre_edit 提醒）。
+
+    直接读已落盘的 retreat_log.md，取最后 n 个「## 第 X 次」小节。
+    无 log / 无记录 → 返回空串（调用方据此决定不打印）。
+    """
+    log = _hdir(root) / "retreat_log.md"
+    if not log.exists():
+        return ""
+    sections = re.split(r"(?=^## 第 )", log.read_text(), flags=re.M)
+    entries = [s.strip() for s in sections if s.strip().startswith("## 第 ")]
+    if not entries:
+        return ""
+    recent = entries[-n:]
+    body = "\n\n".join(recent)
+    return f"📕 错题本（最近 {len(recent)} 次没过的原因，先看再改，别重复踩）：\n\n{body}"
+
+
 def _retreat(root: Path, state: dict, reason: str) -> None:
     state["retreat_count"] = n = state.get("retreat_count", 0) + 1
     _append_retreat_log(root, n, reason)
-    if n > 3:
+
+    # 原地打转检测：连续 SAME_REASON_LIMIT 次失败原因相似 → 提前 stuck，不耗满 3 次。
+    prev = state.get("last_retreat_reason")
+    state["last_retreat_reason"] = reason
+    streak = state.get("same_reason_streak", 1) + 1 if (prev and _reason_similar(prev, reason)) else 1
+    state["same_reason_streak"] = streak
+    spinning = streak >= SAME_REASON_LIMIT
+
+    # 错题本物理注入：把最近失败摘要直接打进回炉输出，不依赖 AI 自觉去读 log。
+    briefing = _retreat_briefing(root)
+
+    if spinning or n > 3:
         state["current_stage"] = "stuck"
-        (_hdir(root)/"stuck_notice.md").write_text(
-            f"# 卡住了\n\n这次开发回头修了 {n} 次都没过。最后一次没过的原因：\n\n{reason}\n\n"
-            "可能是需求描述不够清楚，或者方向需要调整。\n"
-        )
+        if spinning:
+            notice = (
+                f"# 卡住了（原地打转）\n\n连续 {streak} 次都卡在同一个问题上"
+                f"（失败原因高度相似），再回炉大概率还是同样结果。最后一次原因：\n\n{reason}\n\n"
+                "「重复同一个失败」通常是方向不对或需求描述不清，需要你介入，不该再自动重试。\n"
+            )
+        else:
+            notice = (
+                f"# 卡住了\n\n这次开发回头修了 {n} 次都没过。最后一次没过的原因：\n\n{reason}\n\n"
+                "可能是需求描述不够清楚，或者方向需要调整。\n"
+            )
+        (_hdir(root)/"stuck_notice.md").write_text(notice)
         _save(root, state)
-        print(f"修了 {n} 次都没过，我卡住了。最后一次原因：{reason}")
+        if spinning:
+            print(f"连续 {streak} 次卡在同一个问题上（原地打转），我先停下不瞎试了。原因：{reason}")
+        else:
+            print(f"修了 {n} 次都没过，我卡住了。最后一次原因：{reason}")
         print("可能是要换个方向，或者需求描述需要补充。要不要告诉我哪里不对？")
         return
+
     state["current_stage"] = "implement"
     state.setdefault("stage_history",[]).append({"stage":"implement","entered_at":_now(),"reason":f"retreat #{n}"})
     _save(root, state)
     print(f"这次没通过，回头再修一次（第 {n}/3 次）。原因：{reason}")
+    if briefing:
+        print()
+        print(briefing)
     if n >= 2:
         print('💬 卡了多次了？说一句你觉得哪里不对：harness feedback "..."')
 
