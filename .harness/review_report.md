@@ -1,35 +1,39 @@
-# Review Report — Claude 干净上下文二审（自动化双重验证）
+# Review report — Loop 护栏强化②（成本遥测最小版）
 
 ## AC coverage
 
-| AC | Where | Covered? |
-|----|-------|----------|
-| AC1 PROCEED 通过 | pipeline.py `_fresh_context_review`（末行词匹配与三审同款） | ✅ test_ac1 |
-| AC2 FAIL→"判定不通过"+原因 | 同上，f"二审判定不通过：{reason}" | ✅ test_ac2 |
-| AC3 fail-open（CLI 缺失/超时/非0/无法解析/空输出） | try/except + returncode + 解析兜底，5 种情况单测 | ✅ test_ac3 |
-| AC4 空 diff 跳过不调 claude | 函数开头先查 `_impl_period_diff` | ✅ test_ac4 |
-| AC5 链顺序 自审→静态→二审→三审 + 短路 | `_check_review` 顺序插入，3 种短路场景单测 | ✅ test_ac5 |
-| AC6 跨家族 FAIL 消息含"判定不通过" | 措辞修复 + 注释钉死关键词 | ✅ test_ac6 |
-| AC7/AC8 文档 | prompts/03_review.md 四道门 + README 二审/三审 | ✅ test_ac7_ac8 |
+| AC | Where in code | Covered? | Notes |
+|----|---------------|----------|-------|
+| AC1 累计计数持久化 | `pipeline.py` `_bump_review_calls` + `_save` 钳位 | ✅ | 读 pipeline.json → `llm_review_calls`+1 → `_save`；连调 2 次 = 2。**修了真 bug**：retreat 用旧 state `_save` 会把计数清零，`_save` 加单调钳位（取磁盘/内存较大值）保住计数，已专项验证 retreat 后计数仍为 2 |
+| AC2 实际调用才计数 | 二审/三审计数点 | ✅ | **采纳三审意见收紧**：计数点从"网络调用返回后"后移到"确认拿到有效响应后"（claude returncode≠0 / DeepSeek 返回结构异常都不计数），更严格符合 AC2"实际调用 LLM 后才计数"。无 diff / CLI 不可用 / 无 API key 短路均不计数 |
+| AC3 软提醒不熔断 | `pipeline.py:352` `_review_budget_warning` | ✅ | >12 返回中文提醒，≤12 返回 ""；调用处只 `print`，不改 `_check_review` 的 (ok,msg) 返回 → 不影响放行 |
+| AC4 status 可见 | `pipeline.py:900-902` `cmd_status` | ✅ | calls>0 时打印「已调用 LLM 审查：N 次」+ 超额提醒 |
+| AC5 中文/不泄露 | 提醒/计数全中文 | ✅ | 只回显次数，无异常栈/密钥；测试断言无 `Traceback` |
 
-## 自审发现并已修的问题（retreat #1，已记错题本）
+## Implicit-expectation review (Hermes)
 
-初版 `claude -p` 继承项目 cwd → 二审进程会加载被审项目自己的 `.claude/settings.json`
-hooks，stop_check 会拦它收工 → 系统性 180s 超时。已修：`cwd=tempfile.gettempdir()`。
-副作用是正收益：审查者物理上读不到仓库，"只看 diff 不许编"从软规则变硬约束。
+纯内部计数逻辑。相关命中：**用户可见文案中文**✅（提醒/status 全中文）；**不泄露内部**✅（只显次数）；
+**资源关闭**：`_bump_review_calls` 用 `json.loads(pj.read_text())` + `_save`，无句柄泄漏。
 
-## Three honest answers
+## Self-critique
 
-1. **最丑的地方**：`_fresh_context_review` 与 `_cross_family_review` 有约 15 行同构的
-   裁剪/解析逻辑。刻意不抽象——两者失败语义和 IO 通道完全不同（subprocess vs urllib），
-   提前抽公共层会让 fail-open 路径变绕。两处出现，按三次法则还不到抽的时机。
-2. **生产最可能的失败模式**：claude -p 慢（最坏 +3 分钟/次 advance）或用户 CLI 未登录
-   （returncode != 0）。两者都 fail-open 放行，不阻塞，仅损失这道质检。
-3. **spec 不支持的代码**：无。import tempfile 放函数内是为了不动文件顶部 import 行
-   （最小 diff）。
+1. **最丑的一处？**
+   计数粒度是「审查调用次数」而非真实 token/美元——因为没有稳定单价数据（DeepSeek/claude CLI 价目会变）。
+   这是有意识的最小版选择（PM 明确要"先可见、观察数据再决定硬卡"），不是偷懒。次数对"反复回炉烧钱"
+   这个主要场景已是足够的代理指标。
 
-## Scope check
+2. **真实生产最可能的失败模式？**
+   原本 retreat 用旧 state `_save` 会把 `_bump` 写盘的计数覆盖清零（dogfood 时实测命中：retreat 后计数变
+   None），多次回炉场景下计数反复归零、正好废掉"追踪反复烧钱"的核心用途。已用 `_save` 单调钳位修复
+   （取磁盘/内存较大值，仅此键）。残余风险：真并发 advance 仍可能丢一次，但 harness 单 PM 顺序模型无并发，
+   可接受。
 
-改动文件 = spec 影响清单（pipeline.py / 03_review.md / README.md），无越权。
+3. **scope creep？**
+   无。只改了 spec 列的 1 个文件（pipeline.py），只加计数+提醒+status 显示。**没做硬熔断**
+   （明确 out of scope）、没碰 G4 轮次、没估美元成本、没动 ① 的逻辑。
+
+## Verdict
+
+3 个 P0（AC1/AC2/AC3）全覆盖，29/29 测试绿，ruff 全过，软提醒确认不改放行结果（不熔断）。
 
 PROCEED

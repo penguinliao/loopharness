@@ -1,44 +1,47 @@
-# REVIEW 新增 Claude 干净上下文二审（自动化双重验证）
+# Loop 护栏强化②：LLM 审查调用成本遥测 + 软上限提醒（最小版）
+
+> 来源：loop engineering 四护栏之②「Token/成本预算」——v1.3.0 唯一全缺的一条。
+> PM 拍板「最小版」：先加**可见性 + 软提醒**，观察真实花费数据再决定要不要硬熔断
+> （遵循「没数据前不写代码 / 便宜对照组先于贵重改造」原则）。**本版绝不硬熔断**。
 
 ## 背景
 
-PM 一直手动做"双重验证"：开新 Claude Code 对话贴提示词独立审查交付代码。其独特价值 =
-**最强工程审查能力（Claude）× 全新上下文（不知道代码怎么写出来的，无自我说服偏误）**。
-本任务把它自动化进 REVIEW 阶段，loop 无人值守时也能享受这道质检。
-
-设计红线（G4 的 0/38 采纳率教训，照搬 v1.1.4 救活跨家族审查的约束）：
-一轮出结果、只看 diff、看不到的不许编、fail-open 不阻塞主流程。
+- 单条 pipeline 已有硬边界（retreat≤3、G4 ROUND_LIMIT=20），但**对累计 LLM 审查花费零可见性**。
+- 二审（`_fresh_context_review`，claude -p）+ 三审（`_cross_family_review`，DeepSeek）每次 advance 各烧一次；
+  retreat 反复时累加，PM 现在完全看不到「这条任务到底调了多少次 LLM 审查」。
+- 最小版只解决「看得见」+「超了软提醒」，不动 pipeline 放行逻辑。
 
 ## Acceptance criteria
 
 | # | Criterion | Priority |
 |---|-----------|----------|
-| AC1 | 新增 `_fresh_context_review(root)`：调 `claude -p`（干净上下文单次调用），prompt 含 spec + 本期 diff + 与跨家族审查相同的严格 scope 规则；输出末行 PROCEED → 返回通过 | P0 |
-| AC2 | claude 输出末行 `FAIL: <原因>` → 返回 (False, msg)，msg 含"判定不通过"和原因文本（"判定不通过"是 cmd_advance 自动回炉的触发关键词，原因会进错题本） | P0 |
-| AC3 | fail-open：claude CLI 不存在 / 超时 / 退出码非 0 / 输出无法解析或为空 → 一律放行 (True,"")，不阻塞 pipeline | P0 |
-| AC4 | 本期 diff 为空 → 跳过二审且**不调用** claude（没东西可审，省额度） | P0 |
-| AC5 | `_check_review` 检查顺序：自审判定 → ruff/mypy → 二审 → 跨家族三审。前面任何一道不过，后面的**不执行**（静态检查能拦的问题不烧 LLM 额度） | P0 |
-| AC6 | 修存量 bug：`_cross_family_review` 的 FAIL 消息从"独立审查不通过"改为含"判定不通过"——否则 cmd_advance 关键词匹配不到，FAIL 后卡在 REVIEW 阶段无法自动回炉（REVIEW 阶段 hook 锁代码，卡住=死局） | P0 |
-| AC7 | prompts/03_review.md 说明二审机制（advance 时自动发生、FAIL 自动回炉、错题本衔接） | P1 |
-| AC8 | README 无人值守章节更新：三个互相不通气的审查者（自审之外：静态检查 + Claude 二审 + DeepSeek 三审） | P1 |
+| AC1 | `pipeline._bump_review_calls(root)` 把 pipeline.json 的 `llm_review_calls` 累计 +1 并持久化；连调 2 次 → 计数为 2 | P0 |
+| AC2 | 二审/三审**实际调用 LLM 后**才计数；短路跳过（无 diff / claude CLI 不可用）时**不计数** | P0 |
+| AC3 | `pipeline._review_budget_warning(count)`：count > `SOFT_REVIEW_BUDGET` 返回非空中文提醒，否则返回空串；该提醒是**软提醒**，**不改变** `_check_review` 的放行结果（不熔断） | P0 |
+| AC4 | `harness status` 输出里能看到累计 LLM 审查调用次数（可见性） | P1 |
+| AC5 | 提醒/计数文案为中文、对 PM 可读，不泄露内部异常栈或密钥 | P1 |
 
 ## Affected files
 
 | File | Change |
 |------|--------|
-| claude_hh/pipeline.py | 新增 `_fresh_context_review`；`_check_review` 插入二审调用；`_cross_family_review` FAIL 消息措辞修复 |
-| prompts/03_review.md | 二审机制说明 |
-| README.md | 无人值守章节更新 |
+| `claude_hh/pipeline.py` | 新增常量 `SOFT_REVIEW_BUDGET` + helper `_bump_review_calls(root)` / `_review_budget_warning(count)`；`_fresh_context_review` 与 `_cross_family_review` 在**实际 LLM 调用返回后**各 bump 一次并打软提醒；`cmd_status` 增显累计审查调用次数 |
 
-## Out of scope
+## Out of scope（明确不做）
 
-- 不做多轮二审状态机（G4 教训）
-- 不给二审加独立配置开关（claude CLI 缺失即自然跳过；本工具本来就要求 Claude Code 环境）
-- 不改 DeepSeek 跨家族审查的调用方式
-- 二审用什么模型由用户的 claude CLI 默认配置决定，不硬编码 model 参数
+- **硬熔断**：超额自动转 stuck/degraded —— 本版只观察，等真实数据再议
+- G4 antagonist 轮次单独计数 —— G4 已有 ROUND_LIMIT=20 兜底，不重复
+- token 数 / 美元成本换算 —— 无真实单价数据，只计「调用次数」不估钱
+- 不动 retreat 上限、不动 ① 的错题本/原地打转逻辑
 
-## 测试策略
+## 测试策略 / 黑盒测试决策
 
-白盒单元/集成测试（monkeypatch subprocess 与内部函数，tempfile 隔离假项目）。
-黑盒浊龙不适用：被测对象是 pipeline 内部审查链，无 UI；测试直接驱动真实函数已覆盖
-用户可见行为（advance 输出与回炉行为）。
+**不需要浊龙黑盒**。纯内部 CLI/状态机计数逻辑，无 UI。
+用户可见行为由测试直接覆盖：(1) 单元调 `_bump_review_calls`/`_review_budget_warning` 断言计数与提醒；
+(2) monkeypatch `subprocess.run`+`_impl_period_diff` 验「实际调用计数、跳过不计」；
+(3) subprocess 调 `harness status` 断言输出含计数。
+
+## Open questions for PM（非阻断，已采用安全默认）
+
+- `SOFT_REVIEW_BUDGET` 默认 **12**（正常一条 standard 任务约 2-8 次审查调用，12 次意味着反复回炉，
+  值得提醒 PM 看看是不是需求不清）。这是个常量，事后调一行即可。
