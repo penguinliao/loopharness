@@ -495,6 +495,38 @@ def _fresh_context_review(root: Path) -> "tuple[bool, str]":
     return True, ""
 
 
+def _last_review_dissent(root: Path, who: str) -> str:
+    """读某审查器(fresh/cross)上一轮的反对文本（用于检测连续相似反对/移动球门）。"""
+    try:
+        return (_load(root).get("last_review_dissent") or {}).get(who) or ""
+    except Exception:
+        return ""
+
+
+def _update_review_dissent(root: Path, fresh_ok: bool, fresh_msg: str,
+                           cross_ok: bool, cross_msg: str) -> None:
+    """记录本轮各审查器的反对：通过→清空(重置 streak)，反对→存文本，供下一轮比对。"""
+    try:
+        st = _load(root)
+    except Exception:
+        return
+    d = st.get("last_review_dissent") or {}
+    d["fresh"] = "" if fresh_ok else (fresh_msg or "")
+    d["cross"] = "" if cross_ok else (cross_msg or "")
+    st["last_review_dissent"] = d
+    _save(root, st)
+
+
+def _record_review_advisory(root: Path, who: str, msg: str) -> None:
+    """完美主义熔断：把落单审查器连续相似的反对记为 advisory（建议，不阻断放行）。"""
+    label = {"fresh": "二审", "cross": "三審"}.get(who, who)
+    f = _hdir(root) / "review_advisory.md"
+    if not f.exists():
+        f.write_text("# 审查 advisory\n\n落单审查者连续相似反对、已熔断放行的记录；PM 可酌情参考，不阻断交付。\n\n")
+    with f.open("a") as fp:
+        fp.write(f"## {label} 连续反对（{_now()[:19]}）\n\n{msg}\n\n")
+
+
 def _check_review(root: Path) -> "tuple[bool,str]":
     """Strict verdict match (P0 安全审计 — 防注释里 PROCEED 绕过):
     - verdict 必须在文件末段 30 行内（避免 prose 里散落的 PROCEED/FAIL 被当判决）
@@ -521,15 +553,25 @@ def _check_review(root: Path) -> "tuple[bool,str]":
         return False, "自审判定不通过，回去修"
     if not _ruff_mypy(root):
         return False, "代码风格 / 类型检查没过"
-    # 二审：Claude 干净上下文（静态检查之后才烧 LLM 额度；FAIL 短路三审）
+    # 二审：Claude 干净上下文。FAIL 直接回炉——同源清净审查的反对是强信号，照旧短路三审省额度。
     fr_ok, fr_msg = _fresh_context_review(root)
     if not fr_ok:
+        _update_review_dissent(root, False, fr_msg, True, "")
         return False, fr_msg
-    # 三审：跨家族独立审查（轻量，未配置 API 静默跳过）
+    # 三审：跨家族 DeepSeek。二审已过，三审反对时检测"移动球门"完美主义死循环（治 (N-1) 共识缺失）。
     cf_ok, cf_msg = _cross_family_review(root)
-    if not cf_ok:
-        return False, cf_msg
-    return True, ""
+    if cf_ok:
+        _update_review_dissent(root, True, "", True, "")   # 全过 → 重置 streak
+        return True, ""
+    prev = _last_review_dissent(root, "cross")
+    if prev and _reason_similar(prev, cf_msg):
+        # 完美主义熔断：二审已通过 + 三审连续相似反对（移动球门）→ 接受 + 记 advisory（不阻断）
+        _record_review_advisory(root, "cross", cf_msg)
+        _update_review_dissent(root, True, "", True, "")   # 熔断放行后重置 streak
+        return True, ""
+    # 三审首次新反对 → 记下供下轮比对，回炉修（保质量，不放水）
+    _update_review_dissent(root, True, "", False, cf_msg)
+    return False, cf_msg
 
 def _check_g4(root: Path) -> "tuple[bool,str]":
     """Gate 4: cross-family antagonist audit. Pass = consecutive_pass >= 3.

@@ -1,47 +1,48 @@
-# Loop 护栏强化②：LLM 审查调用成本遥测 + 软上限提醒（最小版）
+# 改进③：REVIEW 门禁放宽到 (N-1) 共识 + 完美主义熔断
 
-> 来源：loop engineering 四护栏之②「Token/成本预算」——v1.3.0 唯一全缺的一条。
-> PM 拍板「最小版」：先加**可见性 + 软提醒**，观察真实花费数据再决定要不要硬熔断
-> （遵循「没数据前不写代码 / 便宜对照组先于贵重改造」原则）。**本版绝不硬熔断**。
+> 来源：本次 dogfood 实证 + memory `feedback_consensus_threshold_for_perfectionism`。
+> harness REVIEW 门禁 `_check_review` 要求二审(Claude 干净上下文)+三審(DeepSeek)**全数通过**，
+> 违反用户"≥(N-1) 共识即 PASS"原则——改进②时三審在 AC2 上**移动球门**连续反对，陷死循环。
 
-## 背景
+## 设计：完美主义熔断（不是"1 票放行"）
 
-- 单条 pipeline 已有硬边界（retreat≤3、G4 ROUND_LIMIT=20），但**对累计 LLM 审查花费零可见性**。
-- 二审（`_fresh_context_review`，claude -p）+ 三审（`_cross_family_review`，DeepSeek）每次 advance 各烧一次；
-  retreat 反复时累加，PM 现在完全看不到「这条任务到底调了多少次 LLM 审查」。
-- 最小版只解决「看得见」+「超了软提醒」，不动 pipeline 放行逻辑。
+保持**默认严格**（两审查都过才放行），只熔断"移动球门"死循环：
+- 首次出现的反对（新问题）**仍然回炉修** → 保住质量，不放水
+- 但某一审查**连续 2 轮反对同一个问题**（`_reason_similar` 判定相似）而另一审查已通过
+  → 判定为完美主义/移动球门 → **接受放行 + 把该反对记为 advisory**（不阻断）
+
+为什么不用"≥1 票就放行"：只有 2 个审查器时，那等于"1 个通过就盖过 1 个反对"，会放真 bug 过。
+熔断只针对**重复同一反对**的死循环，首次新反对照常拦。
 
 ## Acceptance criteria
 
 | # | Criterion | Priority |
 |---|-----------|----------|
-| AC1 | `pipeline._bump_review_calls(root)` 把 pipeline.json 的 `llm_review_calls` 累计 +1 并持久化；连调 2 次 → 计数为 2 | P0 |
-| AC2 | 二审/三审**实际调用 LLM 后**才计数；短路跳过（无 diff / claude CLI 不可用）时**不计数** | P0 |
-| AC3 | `pipeline._review_budget_warning(count)`：count > `SOFT_REVIEW_BUDGET` 返回非空中文提醒，否则返回空串；该提醒是**软提醒**，**不改变** `_check_review` 的放行结果（不熔断） | P0 |
-| AC4 | `harness status` 输出里能看到累计 LLM 审查调用次数（可见性） | P1 |
-| AC5 | 提醒/计数文案为中文、对 PM 可读，不泄露内部异常栈或密钥 | P1 |
+| AC1 | 两个审查都 PROCEED → `_check_review` 放行（行为不变） | P0 |
+| AC2 | 恰好一个审查反对，且与该审查**上一轮反对不相似/无上一轮**（首次新问题）→ 仍 FAIL 回炉（保质量，不放水） | P0 |
+| AC3 | 恰好一个审查**连续 2 轮反对同一问题**（`_reason_similar` 相似）+ 另一审查通过 → 放行，且把该反对写入 `.harness/review_advisory.md`（不阻断） | P0 |
+| AC4 | 两个审查都反对 → **始终 FAIL** 回炉（永不放行） | P1 |
+| AC5 | advisory 记录中文可读、不泄露内部异常栈（无 `Traceback`） | P1 |
 
 ## Affected files
 
 | File | Change |
 |------|--------|
-| `claude_hh/pipeline.py` | 新增常量 `SOFT_REVIEW_BUDGET` + helper `_bump_review_calls(root)` / `_review_budget_warning(count)`；`_fresh_context_review` 与 `_cross_family_review` 在**实际 LLM 调用返回后**各 bump 一次并打软提醒；`cmd_status` 增显累计审查调用次数 |
+| `claude_hh/pipeline.py` | `_check_review` 改为：两过→放行；都反对→回炉；恰一反对→查 `_reason_similar(本轮, 上轮该审查反对)`，相似则熔断放行+记 advisory，否则记下本轮反对并回炉。新增 helper `_record_review_advisory(root, who, msg)` 写 `.harness/review_advisory.md`；state 增 `last_review_dissent={"fresh":..,"cross":..}`，全过时清空 |
 
 ## Out of scope（明确不做）
 
-- **硬熔断**：超额自动转 stuck/degraded —— 本版只观察，等真实数据再议
-- G4 antagonist 轮次单独计数 —— G4 已有 ROUND_LIMIT=20 兜底，不重复
-- token 数 / 美元成本换算 —— 无真实单价数据，只计「调用次数」不估钱
-- 不动 retreat 上限、不动 ① 的错题本/原地打转逻辑
+- 不改二审 `_fresh_context_review` / 三審 `_cross_family_review` **各自**的判定逻辑
+- 不动 G4 antagonist（它另有 SAME_ISSUE_LIMIT 机制）
+- 不引入第三个审查器（保持 2 审查 + 熔断，不加模型依赖）
+- 不改 ①错题本/原地打转、②成本遥测的逻辑
 
 ## 测试策略 / 黑盒测试决策
 
-**不需要浊龙黑盒**。纯内部 CLI/状态机计数逻辑，无 UI。
-用户可见行为由测试直接覆盖：(1) 单元调 `_bump_review_calls`/`_review_budget_warning` 断言计数与提醒；
-(2) monkeypatch `subprocess.run`+`_impl_period_diff` 验「实际调用计数、跳过不计」；
-(3) subprocess 调 `harness status` 断言输出含计数。
+**不需要浊龙黑盒**。纯内部判定逻辑、无 UI。
+测试 monkeypatch `_fresh_context_review`/`_cross_family_review`/`_ruff_mypy` 返回受控值 + 造 review_report.md(PROCEED)，
+直接调 `_check_review(root)` 断言四种组合（两过/首次单反对/连续相似单反对/都反对）的放行与 advisory 落盘。
 
 ## Open questions for PM（非阻断，已采用安全默认）
 
-- `SOFT_REVIEW_BUDGET` 默认 **12**（正常一条 standard 任务约 2-8 次审查调用，12 次意味着反复回炉，
-  值得提醒 PM 看看是不是需求不清）。这是个常量，事后调一行即可。
+- "连续几轮相似反对算移动球门"默认 **2**（与①原地打转同口径，loop engineering 护栏③"两轮无变化即退出"）。

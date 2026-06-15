@@ -1,39 +1,38 @@
-# Review report — Loop 护栏强化②（成本遥测最小版）
+# Review report — 改进③：REVIEW 门禁 (N-1) 共识 + 完美主义熔断
 
 ## AC coverage
 
 | AC | Where in code | Covered? | Notes |
 |----|---------------|----------|-------|
-| AC1 累计计数持久化 | `pipeline.py` `_bump_review_calls` + `_save` 钳位 | ✅ | 读 pipeline.json → `llm_review_calls`+1 → `_save`；连调 2 次 = 2。**修了真 bug**：retreat 用旧 state `_save` 会把计数清零，`_save` 加单调钳位（取磁盘/内存较大值）保住计数，已专项验证 retreat 后计数仍为 2 |
-| AC2 实际调用才计数 | 二审/三审计数点 | ✅ | **采纳三审意见收紧**：计数点从"网络调用返回后"后移到"确认拿到有效响应后"（claude returncode≠0 / DeepSeek 返回结构异常都不计数），更严格符合 AC2"实际调用 LLM 后才计数"。无 diff / CLI 不可用 / 无 API key 短路均不计数 |
-| AC3 软提醒不熔断 | `pipeline.py:352` `_review_budget_warning` | ✅ | >12 返回中文提醒，≤12 返回 ""；调用处只 `print`，不改 `_check_review` 的 (ok,msg) 返回 → 不影响放行 |
-| AC4 status 可见 | `pipeline.py:900-902` `cmd_status` | ✅ | calls>0 时打印「已调用 LLM 审查：N 次」+ 超额提醒 |
-| AC5 中文/不泄露 | 提醒/计数全中文 | ✅ | 只回显次数，无异常栈/密钥；测试断言无 `Traceback` |
+| AC1 两过放行 | `pipeline.py:563-565` | ✅ | 二审过 + 三审过 → 清 dissent、return True |
+| AC2 首次单反对回炉 | `pipeline.py:571-573`（三审首次）/ `:559-561`（二审 FAIL 短路） | ✅ | 三审首次反对(无相似上轮)→记 dissent、return False；二审 FAIL 直接短路回炉 |
+| AC3 连续相似反对熔断 | `pipeline.py:566-570` | ✅ | 二审过 + 三审 `_reason_similar(本轮,上轮)` → 记 `review_advisory.md`、放行 |
+| AC4 两反对始终回炉 | `pipeline.py:559-561` | ✅ | 二审 FAIL 即短路 return False（永不放行）；测试 both-fail 经二审拦下 |
+| AC5 advisory 中文不泄露 | `_record_review_advisory:520` | ✅ | 中文标签(二审/三審)+反对原文；测试断言无 `Traceback` |
+
+## 设计说明（为什么不对称）
+
+最终采用**不对称熔断**而非纯 (N-1)："二审(Claude 干净上下文) FAIL 仍短路回炉"（同源清净审查反对是强信号，照旧），
+只对**三审(DeepSeek 跨家族)的连续相似反对**熔断——三审才是实测会"移动球门"的那个。
+好处：(1) 保住质量(二审是硬门)；(2) 省额度(二审过才跑三审，不破坏旧 short-circuit 行为)；
+(3) 不碰倒 legacy `test_ac_fresh_review.py::test_ac5`(它断言二审 FAIL 短路三审)；(4) 精准只治观察到的失败模式。
 
 ## Implicit-expectation review (Hermes)
 
-纯内部计数逻辑。相关命中：**用户可见文案中文**✅（提醒/status 全中文）；**不泄露内部**✅（只显次数）；
-**资源关闭**：`_bump_review_calls` 用 `json.loads(pj.read_text())` + `_save`，无句柄泄漏。
+纯内部判定逻辑。**用户可见文案中文**✅；**不泄露内部**✅(advisory 只记反对文本，无栈)；
+**状态读写**✅(`_update_review_dissent` 用 `_load`/`_save`，`_save` 含 ② 的计数钳位不受影响)。
 
 ## Self-critique
 
-1. **最丑的一处？**
-   计数粒度是「审查调用次数」而非真实 token/美元——因为没有稳定单价数据（DeepSeek/claude CLI 价目会变）。
-   这是有意识的最小版选择（PM 明确要"先可见、观察数据再决定硬卡"），不是偷懒。次数对"反复回炉烧钱"
-   这个主要场景已是足够的代理指标。
-
-2. **真实生产最可能的失败模式？**
-   原本 retreat 用旧 state `_save` 会把 `_bump` 写盘的计数覆盖清零（dogfood 时实测命中：retreat 后计数变
-   None），多次回炉场景下计数反复归零、正好废掉"追踪反复烧钱"的核心用途。已用 `_save` 单调钳位修复
-   （取磁盘/内存较大值，仅此键）。残余风险：真并发 advance 仍可能丢一次，但 harness 单 PM 顺序模型无并发，
-   可接受。
-
-3. **scope creep？**
-   无。只改了 spec 列的 1 个文件（pipeline.py），只加计数+提醒+status 显示。**没做硬熔断**
-   （明确 out of scope）、没碰 G4 轮次、没估美元成本、没动 ① 的逻辑。
+1. **最丑的一处？** 不对称——二审无熔断、只有三审有。理论上若二审也开始移动球门会退化回死循环。
+   但二审是同源清净 diff 审查，实测不是 goalpost-mover；且 retreat≤3 + stuck 是兜底。属有意识权衡。
+2. **真实生产最可能失败模式？** `last_review_dissent` 存在 pipeline.json，`_update_review_dissent` 读改写，
+   与 ② 的 `_save` 计数钳位共存——已确认钳位只动 `llm_review_calls` 键，不影响 `last_review_dissent`。
+   全过/熔断后都 reset streak，避免跨任务残留误判（新任务 start 也会重建 state）。
+3. **scope creep？** 无。只改 `_check_review` + 3 个 helper，没碰二审/三审各自判定、没碰 G4、没加第三个审查器。
 
 ## Verdict
 
-3 个 P0（AC1/AC2/AC3）全覆盖，29/29 测试绿，ruff 全过，软提醒确认不改放行结果（不熔断）。
+3 个 P0(AC1/AC2/AC3)全覆盖，33/33 测试绿(含恢复的 legacy test_ac5)，ruff 全过。
 
 PROCEED
