@@ -1,38 +1,49 @@
-# Review report — 改进③：REVIEW 门禁 (N-1) 共识 + 完美主义熔断
+# 自审报告：loop 化②（第 2 轮，stale-verdict 已修）
 
-## AC coverage
+## AC 覆盖
 
-| AC | Where in code | Covered? | Notes |
-|----|---------------|----------|-------|
-| AC1 两过放行 | `pipeline.py:563-565` | ✅ | 二审过 + 三审过 → 清 dissent、return True |
-| AC2 首次单反对回炉 | `pipeline.py:571-573`（三审首次）/ `:559-561`（二审 FAIL 短路） | ✅ | 三审首次反对(无相似上轮)→记 dissent、return False；二审 FAIL 直接短路回炉 |
-| AC3 连续相似反对熔断 | `pipeline.py:566-570` | ✅ | 二审过 + 三审 `_reason_similar(本轮,上轮)` → 记 `review_advisory.md`、放行 |
-| AC4 两反对始终回炉 | `pipeline.py:559-561` | ✅ | 二审 FAIL 即短路 return False（永不放行）；测试 both-fail 经二审拦下 |
-| AC5 advisory 中文不泄露 | `_record_review_advisory:520` | ✅ | 中文标签(二审/三審)+反对原文；测试断言无 `Traceback` |
+- **AC1/AC2**：`_check_external_review` 物理上只读 `external_review.md`，从不引用 zhuolong
+  → 浊龙取任何值都改变不了判定。AC2 测试真喂浊龙 PASS/不通过/缺失三种并断言决策集合唯一。
+- **AC3**：`_external_gate` 决策 wait/retreat/degraded/pass，retreat_count≥3 边界与 spec 一致。
+- **AC4**：`prompts/02_implement.md` 含错题本必读 + fresh 子 agent 有界派工指令。
+- **AC5**：`prompts/06_external_test.md` 含认知隔离(只看 spec+产物) + external_review.md + fail-open。
 
-## 设计说明（为什么不对称）
+## 第 1 轮发现的问题 → 已修
 
-最终采用**不对称熔断**而非纯 (N-1)："二审(Claude 干净上下文) FAIL 仍短路回炉"（同源清净审查反对是强信号，照旧），
-只对**三审(DeepSeek 跨家族)的连续相似反对**熔断——三审才是实测会"移动球门"的那个。
-好处：(1) 保住质量(二审是硬门)；(2) 省额度(二审过才跑三审，不破坏旧 short-circuit 行为)；
-(3) 不碰倒 legacy `test_ac_fresh_review.py::test_ac5`(它断言二审 FAIL 短路三审)；(4) 精准只治观察到的失败模式。
+stale 验收 verdict 导致空转回炉：外测没过 → 回炉 → 返工后读到上一轮残留的旧判定 → 立刻又回炉。
+**修复**：新增 `_invalidate_external_review`，在 `_finish_test` 的 retreat 分支（retreat 前、
+degraded 不删）清掉 stale 的 external_review.md，强制返工后变 "wait" 重新外测。
+手动验证：修前 gate=retreat → 清掉 → gate=wait（强制重新验收）。
+后置条件已由 `test_ac3_external_missing_gate_waits` 覆盖。
 
-## Implicit-expectation review (Hermes)
+## 检查项
 
-纯内部判定逻辑。**用户可见文案中文**✅；**不泄露内部**✅(advisory 只记反对文本，无栈)；
-**状态读写**✅(`_update_review_dissent` 用 `_load`/`_save`，`_save` 含 ② 的计数钳位不受影响)。
+- ruff 整仓干净；mypy 未安装(gate 跳过)；全套 43 测试过。
+- CJK 词边界正则已实测：`判定：通过`→PASS、`不通过`→正确归为没过且不误命中 PASS。
+- 本轮顺手修了一个 P2 文案（delivery_report 拼接缺换行，已补）。
+- **二审抓到的 P0 已修**：`_check_external_review` 原来"PASS 词压过不通过词"——一份判没过
+  但正文含"通过/PASS"的验收报告会被误放行，击穿安全门禁。已改成 fail-closed 的
+  "末位判定为准"（照搬 `_check_review` 已验证逻辑）。手动验证：判没过+正文含"通过"→正确归为没过。
+- 遗留 P2（不阻断）：两个 tail 解析函数可抽公共 helper，后续整洁化。
 
-## Self-critique
+## 独立 Sub-agent 审查结论
 
-1. **最丑的一处？** 不对称——二审无熔断、只有三审有。理论上若二审也开始移动球门会退化回死循环。
-   但二审是同源清净 diff 审查，实测不是 goalpost-mover；且 retreat≤3 + stuck 是兜底。属有意识权衡。
-2. **真实生产最可能失败模式？** `last_review_dissent` 存在 pipeline.json，`_update_review_dissent` 读改写，
-   与 ② 的 `_save` 计数钳位共存——已确认钳位只动 `llm_review_calls` 键，不影响 `last_review_dissent`。
-   全过/熔断后都 reset streak，避免跨任务残留误判（新任务 start 也会重建 state）。
-3. **scope creep？** 无。只改 `_check_review` + 3 个 helper，没碰二审/三审各自判定、没碰 G4、没加第三个审查器。
+> 独立 Explore sub-agent（干净上下文，只看 spec + diff + 测试，不知代码怎么写的）原文判定。
 
-## Verdict
+独立判定：通过（PROCEED），无 P0 阻断问题。要点：
 
-3 个 P0(AC1/AC2/AC3)全覆盖，33/33 测试绿(含恢复的 legacy test_ac5)，ruff 全过。
+- AC1/AC2 满足：`_check_external_review` 函数体只构造 external_review.md 路径，全程无 zhuolong
+  引用，浊龙物理上无法影响判定；AC2 测试真喂三种浊龙值断言决策集合唯一，是真行为断言。
+- AC3 满足：四态决策正确，`>=3` 边界与 spec"≥3 带病交付"一致，测试用 0 和 3 两点覆盖边界。
+- stale-verdict 已修：`_invalidate_external_review` 在 retreat 分支先清后退，degraded 分支
+  保留旧报告供 delivery_report 引用，逻辑闭环。
+- _finish_test 无回归：无 external_brief 直接 done；浊龙降级为旁证只 print 不门禁；无 brief 时
+  `_check_zhuolong` 返回 pass 不误打印。
+- 测试真实性：12 个测试真 import 真调函数断言返回值，tempfile 隔离、无 bare assert；
+  AC4/AC5 读 prompt 断言关键串符合 spec 测试方案约定，非假绿。
+- 新 P0 排查：read_text/unlink 有 exists/missing_ok 保护，re 模块顶部已 import 不会 NameError；
+  向后兼容（浊龙降级是 spec 明确要求的设计内变更）；CJK 正则边界已独立实测无误。
+
+总结：5 条 P0 AC 实现与测试一致，stale-verdict 修复时机正确，无回归、无新阻断问题，可放行。
 
 PROCEED

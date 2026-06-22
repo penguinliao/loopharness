@@ -872,6 +872,68 @@ def _check_zhuolong(root: Path) -> "tuple[str, str]":
     return "pass", ""
 
 
+def _check_external_review(root: Path) -> "tuple[str, str]":
+    """外测独立验收门禁。**只读 external_review.md，绝不读浊龙报告**。
+
+    外测 = 独立 agent（干净上下文，只看 spec + 产物）对照 AC 的验收判定。
+    浊龙黑盒可靠性低（实测埋雷发现率 ~20%），仅作旁证，不作放行依据，
+    故本函数物理上不碰 zhuolong_report —— 浊龙取任何值都改变不了这里的判定。
+
+    fail-closed 判定（与 _check_review 同核）：末段同时出现 PASS/FAIL 词时**取最后一个为准**，
+    不让正文里散落的"通过/PASS"压过末尾的 FAIL 判定（否则一份判定 FAIL 但正文写了"大部分通过"
+    的报告会被误判放行，击穿安全门禁）。
+
+    返回 (status, msg)：
+    - "pass" → external_review.md 末段最后一个判定是 PASS
+    - "fail" → 末段最后一个判定是 FAIL（回炉/带病交付）
+    - "wait" → external_review.md 缺失或末段无任何判定（等独立 agent，不烧 retreat 预算）
+    """
+    er = root / ".harness" / "external_review.md"
+    if not er.exists():
+        return "wait", "外测：独立验收 agent 还没产出 external_review.md，等它跑完再继续"
+    tail = "\n".join(er.read_text().splitlines()[-50:]).upper()
+    tail_clean = re.sub(r"```.*?```", "", tail, flags=re.DOTALL)
+    last_pass = last_fail = -1
+    for m in re.finditer(r"\b(PASS|通过|可上线)\b", tail_clean):
+        last_pass = m.start()
+    for m in re.finditer(r"\b(FAIL|BLOCKED|不通过)\b", tail_clean):
+        last_fail = m.start()
+    if last_fail > last_pass:
+        return "fail", "外测独立验收报 FAIL，回去修"
+    if last_pass == -1:
+        return "wait", "external_review.md 末段没看到 PASS/FAIL 判定"
+    return "pass", ""
+
+
+def _external_gate(root: Path, state: dict) -> "tuple[str, str]":
+    """外测关卡动作决策。放行/回炉只由独立验收 verdict 决定，浊龙永不改判。
+
+    返回 (action, msg)：
+    - "wait"     → 等独立验收（external_review 缺失/无判定）
+    - "retreat"  → 验收 FAIL 且预算未耗尽 → 回炉
+    - "degraded" → 验收 FAIL 且 retreat_count ≥ 3 → 带病交付，永不挂起
+    - "pass"     → 验收 PASS → 放行
+    """
+    status, msg = _check_external_review(root)
+    if status == "wait":
+        return "wait", msg
+    if status == "fail":
+        if state.get("retreat_count", 0) >= 3:
+            return "degraded", msg
+        return "retreat", msg
+    return "pass", msg
+
+
+def _invalidate_external_review(root: Path) -> None:
+    """返工前作废上一轮外测验收：删掉 stale 的 external_review.md。
+
+    否则外测 FAIL → 回炉 → 返工后 _external_gate 读到**上一轮**残留的 FAIL，
+    不等独立 agent 重新验收就立刻又回炉 → 空烧 retreat 预算 → 过早 degraded。
+    删掉后下一轮变 "wait"，强制独立 agent 对**本轮**产物重新验收。
+    """
+    (root / ".harness" / "external_review.md").unlink(missing_ok=True)
+
+
 def _degraded_delivery(root: Path, state: dict, reason: str) -> None:
     """带病交付：自动测试全过但黑盒修满预算仍没过 → 照样交付 + 诚实的交付报告.
 
@@ -882,10 +944,11 @@ def _degraded_delivery(root: Path, state: dict, reason: str) -> None:
     rc = state.get("retreat_count", 0)
     (_hdir(root) / "delivery_report.md").write_text(
         "# 交付报告：已交付，有遗留问题 ⚠️\n\n"
-        f"功能代码的自动测试全部通过，但浊龙黑盒测试修了 {rc} 轮仍没过。\n"
+        f"内测（功能自动测试）全部通过，但外测（独立验收）修了 {rc} 轮仍没过。\n"
         "按约定不再挂起，照常交付，由你决定要不要上线。\n\n"
         f"## 遗留问题（上线前请你确认）\n\n{reason}\n\n"
-        "浊龙最近一次完整报告：`.harness/zhuolong_report.md`\n\n"
+        "独立验收报告：`.harness/external_review.md`\n"
+        "（浊龙黑盒旁证若有：`.harness/zhuolong_report.md`）\n\n"
         f"## 修复尝试记录（错题本）\n\n{history}\n"
     )
     state["current_stage"] = "done"
@@ -906,21 +969,27 @@ def _finish_test(root: Path) -> None:
     浊龙黑盒测试 opt-in：写 zhuolong_brief.md 才启用。
     浊龙 FAIL → 自动回炉（≤3 轮）；预算耗尽 → 带病交付，永不挂起。"""
     state = _load(root)
-    ok, msg = _run_tests(root)
+    ok, msg = _run_tests(root)  # 内测：Claude 自己写的测试
     state = _load(root)
     if not ok: _retreat(root,state,msg); return
-    print(f"测试全过 ✓ {msg}")
-    # 浊龙黑盒测试（opt-in）
+    print(f"内测全过 ✓ {msg}")
+    # 浊龙黑盒：仅旁证，记录不门禁（可靠性低，不作放行依据）
     z_status, z_msg = _check_zhuolong(root)
-    if z_status == "wait":
-        print(f"  {z_msg}")
-        return  # 报告还没产出，留在 test 阶段等浊龙
-    if z_status == "fail":
-        if state.get("retreat_count", 0) >= 3:
-            _degraded_delivery(root, state, z_msg)
+    if z_status != "pass":
+        print(f"  （浊龙旁证：{z_msg}；仅供参考，不影响放行）")
+    # 外测：独立验收 agent 把关（opt-in，写了 external_brief.md 才启用）
+    if (root/".harness"/"external_brief.md").exists():
+        action, x_msg = _external_gate(root, state)
+        if action == "wait":
+            print(f"  {x_msg}")
+            return  # 等独立验收 agent 产出 external_review.md
+        if action == "degraded":
+            _degraded_delivery(root, state, x_msg)
             return
-        _retreat(root, state, z_msg)
-        return
+        if action == "retreat":
+            _invalidate_external_review(root)  # 清 stale 验收，强制返工后重新外测
+            _retreat(root, state, x_msg)
+            return
     state["current_stage"]="done"; state["updated_at"]=_now(); _save(root,state)
     print("这次开发做完了 ✓")
     print('💬 想说点什么改进的？一句话：harness feedback "..."  （不写也行）')

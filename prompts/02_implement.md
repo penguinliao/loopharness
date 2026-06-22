@@ -10,6 +10,20 @@ You are now in the **IMPLEMENT** stage. The spec is locked. Your job is to write
 
 If you discover the spec is wrong (truly impossible to satisfy, or self-contradictory), do NOT try to work around it. Stop and write a one-line note to `.harness/change_request.md` explaining what you'd need to change. The PM will look. You don't get to soften your own goal.
 
+## 怎么干这一轮（fresh-context 派工，治"单长会话越跑越贵"）
+
+实测：把开发塞进一条不断变长的主会话里自我监工，会让同一个任务多花 2.4× 成本
+（27 轮 vs 6 轮、cache_read 5.8×），因为每轮都重读全部历史（re-read 税）。
+所以本轮开发/返工**派一个 fresh 子 agent 来做**，而不是在主会话里一路堆下去：
+
+- 派出去的子 agent **只喂三样**：`spec.md` + `retreat_log.md`（错题本）+ 本轮真正相关的文件。
+  不要把整段对话历史、无关文件塞给它——上下文是 RAM 不是硬盘，进度已经落在 `.harness/` 文件里。
+- 子 agent 干完**把代码写到磁盘 + 回一段 ≤2k token 的小结就退出**，不在主会话累积。
+- 返工时同理：开**一个全新的**子 agent（不是接着上一轮那个），它开工第一步读错题本，
+  针对上次失败原因改，绝不重复已经失败过的改法。
+- 主 Agent 自己是**薄调度员**：读 `pipeline.json` 状态 → 派对应阶段的工人 → 收小结 → advance，
+  自己不囤工作记忆。
+
 ## What to do
 
 0. **If `.harness/retreat_log.md` exists, read it FIRST.** 这是错题本——上几轮没通过的
