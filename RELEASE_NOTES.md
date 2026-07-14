@@ -32,7 +32,8 @@ LoopHarness 把原有 spec-first pipeline 扩展成跨 Claude、Codex、Kimi、G
 
 ## 兼容性
 
-仓库名 `claude-hh-v1`、Python 包名 `claude_hh` 和 `harness init/start/advance/status` 保持不变。
+GitHub 仓库从 v1.4 起使用 `loopharness`，Python 包名 `claude_hh` 和
+`harness init/start/advance/status` 保持不变；旧仓库地址由 GitHub 自动跳转。
 LoopHarness 是公开产品展示名。Claude 保留原生项目 hook 旅程；Codex、Kimi、GLM 当前接入
 文件式合同、上下文、证据和记忆协议，不声称拥有相同的原生 hook 或会话控制能力。
 
