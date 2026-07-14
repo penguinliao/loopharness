@@ -1,104 +1,48 @@
-# Claude H-H v1.0 — Release Notes
+# LoopHarness v1.4.0 — Release Notes
 
-**Released**: 2026-04-26
-**Lines of code**: 298 Python (down from 8600)
-**Status**: Distilled from v0.3.4 based on A/B test data
+**Release candidate date**: 2026-07-14
 
----
+## 一句话
 
-## TL;DR
+LoopHarness 把原有 spec-first pipeline 扩展成跨 Claude、Codex、Kimi、GLM 的可靠交付层：
+先锁定 Delivery Contract，再给模型最小上下文，最后只用当前仍有效的 artifact 证据报告
+就绪度。
 
-In v1.0 we deleted 96% of our own code.
+## 新增
 
-A two-round A/B benchmark on 8 real coding tasks showed that **only one feature** in v0.3.4's 8600 lines produced measurable accuracy gains:
+- `harness memory-init`：幂等创建项目内跨模型共享记忆。
+- `harness contract`：保存目标、验收标准、风险与资料授权。
+- `harness context`：为四种 agent 生成同格式的最小上下文 bundle。
+- `harness evidence`：为项目内 artifact 写入默认标为 declared 的 SHA-256 receipt。
+- `harness readiness`：重验当前 hash，分开报告 declared 与 verified，只用 verified 计算交付等级。
+- `harness learn`：将学习候选放入 adopt、confirm 或 receipt_only。
 
-> **spec-first**: forcing the AI to write `acceptance criteria` before code. +20pp average coverage on PM-perspective tasks.
+## 安全与诚实边界
 
-Everything else — the 8-dimension scoring engine, micro/standard/full routes, the skill extractor, ruff+mypy+bandit+radon scans, the cooldown timer, the boundary-check edge cases — was zero or negative incremental value.
+- 合同拒绝 `.env`、密钥/凭据文件、项目外路径；上下文对未授权、过大或不可读文件 fail closed。
+- receipt 不是内容真实性证明：默认 declared 只证明 artifact 登记时的身份与当前 hash；
+  artifact 被改动、删除或同种 evidence 最新结果失败后，连当前声明也会失效。
+- verified 只由完成真实检查的受信宿主通过 library API 显式写入；CLI 不提供自我认证入口。
+- 模型自我反思不能直接成为长期规则；agent CLI 不能使用 `user_explicit`。该来源只供验证了
+  用户身份的宿主事件通过 library API 调用；只有当前有效的 verified receipt 可支持证据型学习。
+- `.delivery`、`.agent-memory` 或内部任意子项是 symlink 时读写 fail closed，避免把项目记录或读取重定向到外部；拒绝时不会擅自删除用户 symlink。
+- `harness init` 会移除旧 `.claude-hh/hooks/`，同时保留无关 hooks，并确保当前两个 hook 各一份。
+- CLI 错误只报告路径/类型问题，不回显秘密文件内容。
+- LoopHarness 不是对本地恶意代码的安全沙箱；拥有任意 Python/项目文件写权限的进程仍可篡改本地记录。
 
-So we kept spec-first, plus its supporting cast (4 stage gates, retreat budget, two hooks, a Hermes checklist), and deleted the rest.
+## 兼容性
 
----
+仓库名 `claude-hh-v1`、Python 包名 `claude_hh` 和 `harness init/start/advance/status` 保持不变。
+LoopHarness 是公开产品展示名。Claude 保留原生项目 hook 旅程；Codex、Kimi、GLM 当前接入
+文件式合同、上下文、证据和记忆协议，不声称拥有相同的原生 hook 或会话控制能力。
 
-## What changed from v0.3.4 → v1.0
+## 安装与验证
 
-### Removed (≈8000 lines deleted)
+`install.sh` 会把标准库实现复制到安装目录，并在 `HARNESS_BIN_DIR`（默认
+`~/.local/bin`）生成独立可执行文件。安装器可重复运行，不会重复写 shell PATH。
 
-- **8-dimension quality scoring engine** — `reward.py` (746 lines). Replaced with `ruff check` + `mypy` (≈30 lines).
-- **Three pipeline routes (micro / standard / full)** — confusion machine. v1.0 has one flow.
-- **Six hooks → two hooks** — `pre_edit` and `stop_check` only. The other four were guarding against edge cases that don't fire in practice.
-- **Skill extractor** — never produced a usable skill in real runs. Replaced with a hand-curated `hermes/implicit_expectations.md`.
-- **Cooldown timers** — added in v0.3.1 to fix "blind retry," then patched four times because the granularity was wrong. v1.0 has no cooldowns; the retreat counter caps at 3.
-- **Pipeline expiration** — same story.
-- **Mutation testing module** — meta-circular validation that confused users.
-- **Telemetry** — collected but never looked at.
-- **Spec validator** with three-tier LLM fallback — over-engineered. v1.0 uses simple grep for "P0" + file existence.
-- **Autofix loop** — only triggered on ruff lint, which Sonnet doesn't typically fail.
+发布候选门禁：锁定 v1.4 测试、正式 delivery 回归、历史 pipeline 回归、`ruff`、
+`py_compile`、`git diff --check` 与全新 HOME 安装 smoke。
 
-### Added
-
-- **`hermes/implicit_expectations.md`** — hand-curated checklist of "things PMs forget to mention" (partial-match search, password hashing, token expiration, anti-enumeration, etc.). The SPEC stage prompt explicitly directs the AI to consult this before writing acceptance criteria. Each entry is grounded in a real failure from past pipelines.
-- **`hermes-review` command** — after every completed pipeline, the AI proposes new implicit-expectation entries based on what it had to figure out. The PM reviews them y/n. Approved entries are appended to the global checklist. **The tool gets smarter with use, but a human always gates the accumulation.**
-
-### Kept (the 4% that earned its keep)
-
-- 4-stage state machine: SPEC → IMPLEMENT → REVIEW → TEST
-- Hook-enforced cognitive isolation: tests written in SPEC are physically locked from IMPLEMENT
-- Retreat-on-failure with budget cap (3 retreats, then stop and ask the human)
-
----
-
-## A/B test data backing this rewrite
-
-| Task type | v0.3.4 H-H lift | Verdict |
-|-----------|----------------|---------|
-| Tech-spec briefs (Round 1) | 0pp on every criterion | No value — full spec already implicit in brief |
-| PM-style ambiguous briefs (Round 2) | +20pp avg, +40pp on hardest | Real value — comes from spec-first |
-| Business-logic invariants (token single-use, etc.) | 0pp | Static analysis can't reach this — needs integration tests, not gates |
-| Boilerplate (registration, JWT, CORS) | 0pp | Sonnet already gets these right |
-
-So in v1.0:
-
-- We optimize hard for the +20pp case (spec-first + Hermes checklist)
-- We don't try to fight the 0pp cases with more layers of static analysis (we tried; we lost)
-- We accept that some failure modes belong outside this tool (integration tests, code review, runtime monitoring)
-
-Full data in `claude-hh-experiments/results/STORY_v2.md` and `STORY.md`.
-
----
-
-## Migration from v0.3.x
-
-**Short answer**: don't. Start fresh.
-
-```bash
-# Optional: archive old project state
-mv ~/.harness ~/.harness.v0.3-backup
-
-# Install v1.0
-curl -sSL https://raw.githubusercontent.com/penguinliao/claude-hh/v1/install.sh | bash
-```
-
-v1.0 deliberately doesn't import old `.harness/` state. The state machines are different shapes; auto-migration would be more code than the entire project. If you have an in-progress v0.3.x pipeline, finish or reset it before installing v1.0.
-
----
-
-## Honest caveats
-
-1. **Sample size is still small** — 8 tasks total, 3 in PM-perspective format. We're confident about direction, less confident about magnitude.
-2. **Tested only with Claude Sonnet.** Haiku-class models might benefit more (they make more avoidable mistakes); GPT/other backends are untested.
-3. **Single-file tasks only.** Multi-file refactors might get more or less benefit from spec-first; we don't know.
-4. **The Hermes checklist is hand-maintained.** Auto-extraction has been tried and didn't work; PM oversight is in the loop by design, but it's a real cost.
-5. **REVIEW stage now does less.** v0.3.4's REVIEW ran scoring across 8 dimensions and the AI's own self-review. v1.0 keeps the self-review (which v2 data showed was the valuable part) and replaces the multi-dim scoring with a thin `ruff + mypy` gate. If you find a class of issue this misses that v0.3.4 caught, please file it.
-
----
-
-## What this release means for the project
-
-Claude H-H started as a "rails for AI coding" experiment in 2026-Q1 and grew to 8600 lines over six months. v1.0 is the result of being honest with the data: most of those lines were elaborate ways of solving problems Sonnet didn't have. The 4% that fixed real problems is what we're shipping.
-
-If your only response to this release is *"that's it?"* — yes, that's it. The point of v1.0 is that there isn't more.
-
----
-
-*This release was written by the same PM who built v0.3.4. The decision to delete 96% of his own code was supported by the A/B data, not by an outside reviewer.*
+完整复现命令见 [README](README.md)，正式 delivery 用例见
+[claude_hh/tests/test_delivery.py](claude_hh/tests/test_delivery.py)。

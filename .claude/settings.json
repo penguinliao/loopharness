@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/lkk/Desktop/app/harness-engineering/claude-hh-v1/hooks/pre_edit.py"
+            "command": "python3 hooks/pre_edit.py"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/lkk/Desktop/app/harness-engineering/claude-hh-v1/hooks/stop_check.py"
+            "command": "python3 hooks/stop_check.py"
           }
         ]
       }

@@ -2,6 +2,10 @@
 
 You are now in the **IMPLEMENT** stage. The spec is locked. Your job is to write code that makes every test in `.harness/test_*.py` pass and every AC in `.harness/spec.md` true.
 
+无论当前 agent 是 Claude、Codex、Kimi 还是 GLM，都只使用 Delivery Contract
+授权的最小上下文。缺失信息要明确暴露，禁止为了继续执行而读取秘密文件、项目外
+资料或扩大权限。实现完成不等于证据成立；只有真实 artifact 才能登记 receipt。
+
 ## Hard rules (hook-enforced)
 
 - ❌ You CANNOT modify `.harness/spec.md` (locked from SPEC)

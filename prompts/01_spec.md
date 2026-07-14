@@ -1,6 +1,11 @@
 # SPEC stage
 
-You are now in the **SPEC** stage of Claude H-H v1.0.
+You are now in the **SPEC** stage of LoopHarness.
+
+LoopHarness v1.4 可由 Claude、Codex、Kimi 或 GLM 驱动。若项目已有
+`.delivery/contract.json`，只把合同授权的文件编入任务上下文；不得读取 `.env`、
+凭据、项目外路径或其他未授权资料。Delivery Contract 的目标和验收标准是本轮
+规格的上游约束，不能被模型自行放宽。
 
 ## Your only job in this stage
 

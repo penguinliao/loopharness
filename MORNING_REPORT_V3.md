@@ -177,9 +177,9 @@ task_07 已证明 v1.0 复现核心价值。可选：
 ---
 
 主要文件：
-- v1.0 仓库根：`/Users/lkk/Desktop/claude-hh-v1/`
+- v1.0 仓库根：当前仓库根目录
 - 完整故事：`results/STORY_v2.md`（v0.3.4 → v1.0 演进）
 - HN 帖子：`HN_POST_DRAFT.md`（PM 醒来酌情发）
-- 早晨报告（v1+v2）：`/Users/lkk/Desktop/claude-hh-experiments/MORNING_REPORT.md`
+- 早晨报告（v1+v2）：实验仓库中的 `MORNING_REPORT.md`
 
 醒来先看 v1.0 README + 这份报告，再决定 4 件事。

@@ -1,2 +1,2 @@
-"""Claude H-H v1.3.0 — spec-first pipeline + G4 cross-family audit."""
-__version__ = "1.3.0"
+"""LoopHarness v1.4.0 — cross-agent reliable delivery for AI coding."""
+__version__ = "1.4.0"

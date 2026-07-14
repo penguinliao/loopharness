@@ -2,6 +2,10 @@
 
 You are now in the **REVIEW** stage. Code is written. Now check it against the spec, line by line.
 
+跨模型审查必须遵守同一份 Delivery Contract，不因 agent 是 Claude、Codex、Kimi
+或 GLM 而改变验收口径。模型自述、推测和历史成功 receipt 都不能替代当前 artifact；
+发现证据文件已变化或同类最新结果失败时，必须按失败处理。
+
 ## Hard rules (hook-enforced)
 
 - ❌ You CANNOT modify any file in this stage (no spec, no tests, no code)

@@ -1,10 +1,11 @@
-"""Claude H-H v1.0 — spec-first pipeline CLI."""
+"""LoopHarness v1.4 — spec-first pipeline and cross-agent delivery CLI."""
 from __future__ import annotations
-import argparse, glob, json, os, re, subprocess, sys, textwrap
+import argparse, glob, json, os, re, shlex, subprocess, sys, textwrap
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from claude_hh import __version__
 from claude_hh.antagonist import SIMILARITY_THRESHOLD
 
 # 连续 N 次失败原因相似 → 判定「原地打转」提前 stuck（loop engineering 护栏③：无进展检测，
@@ -742,10 +743,34 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     def _is_v03(cmd: str) -> bool:
         return "harness-engineering" in cmd or "/install_v2.py" in cmd
-    def _is_v1(cmd: str) -> bool:
-        return ".claude-hh/hooks/" in cmd or cmd in (pre_edit_cmd, stop_check_cmd)
+    def _is_legacy_v1(cmd: str) -> bool:
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            return False
+        if len(parts) != 2 or Path(parts[0]).name not in {"python", "python3"}:
+            return False
+        target = Path(parts[1])
+        target_parts = target.parts
+        official_relative = (
+            not target.is_absolute()
+            and target_parts in {
+                ("hooks", "pre_edit.py"),
+                ("hooks", "stop_check.py"),
+            }
+        )
+        return (
+            target.name in {"pre_edit.py", "stop_check.py"}
+            and (
+                official_relative
+                or (".claude-hh" in target_parts and "hooks" in target_parts)
+            )
+        )
 
-    cleaned_v03, kept_v1 = 0, 0
+    def _is_current_v1(cmd: str) -> bool:
+        return cmd in (pre_edit_cmd, stop_check_cmd)
+
+    cleaned_v03, cleaned_v1, replaced_current = 0, 0, 0
     for stage in list(h.keys()):
         new_entries = []
         for entry in h.get(stage, []):
@@ -754,31 +779,26 @@ def cmd_init(args: argparse.Namespace) -> None:
                 cmd = hk.get("command", "")
                 if _is_v03(cmd):
                     cleaned_v03 += 1; continue
-                if _is_v1(cmd):
-                    kept_v1 += 1
+                if _is_legacy_v1(cmd):
+                    cleaned_v1 += 1; continue
+                if _is_current_v1(cmd):
+                    replaced_current += 1; continue
                 new_hooks.append(hk)
             if new_hooks:
                 e = dict(entry); e["hooks"] = new_hooks; new_entries.append(e)
         h[stage] = new_entries
 
-    has_pre_edit = any(any(hk.get("command")==pre_edit_cmd for hk in e.get("hooks",[])) for e in h.get("PreToolUse",[]))
-    has_stop_check = any(any(hk.get("command")==stop_check_cmd for hk in e.get("hooks",[])) for e in h.get("Stop",[]))
-
-    added = []
-    if not has_pre_edit:
-        h.setdefault("PreToolUse",[]).append({"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":pre_edit_cmd}]})
-        added.append("pre_edit")
-    if not has_stop_check:
-        h.setdefault("Stop",[]).append({"hooks":[{"type":"command","command":stop_check_cmd}]})
-        added.append("stop_check")
+    h.setdefault("PreToolUse",[]).append({"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":pre_edit_cmd}]})
+    h.setdefault("Stop",[]).append({"hooks":[{"type":"command","command":stop_check_cmd}]})
 
     sf.write_text(json.dumps(cfg, indent=2)); _hdir(root)
     _ensure_claude_md(root)
 
     parts = []
     if cleaned_v03: parts.append(f"清理 {cleaned_v03} 个 v0.3.x 老 hook")
-    if added: parts.append(f"装 {len(added)} 个 v1 hook ({'+'.join(added)})")
-    if not parts: parts.append("hooks 已就绪（幂等，无变化）")
+    if cleaned_v1: parts.append(f"清理 {cleaned_v1} 个旧路径 v1 hook")
+    if replaced_current: parts.append(f"去重 {replaced_current} 个当前 hook")
+    parts.append("装 2 个当前 hook (pre_edit+stop_check)")
     print(f"Claude H-H 初始化在 {root}")
     print(f"  · {'; '.join(parts)}")
     print("  · 运行 `harness start \"<任务描述>\"` 开始。")
@@ -1054,12 +1074,135 @@ def cmd_antagonist(args: argparse.Namespace) -> None:
     sys.exit(antagonist_cli.main([sub, "--project", project]))
 
 
+def _delivery_project(args: argparse.Namespace) -> Path:
+    return Path(args.project).expanduser() if args.project else Path.cwd()
+
+
+def _delivery_failure(exc: ValueError) -> None:
+    print(f"没法完成：{exc}")
+    raise SystemExit(2)
+
+
+def cmd_memory_init(args: argparse.Namespace) -> None:
+    from claude_hh import delivery
+
+    try:
+        result = delivery.init_memory(_delivery_project(args))
+    except ValueError as exc:
+        _delivery_failure(exc)
+        return
+    print(f"跨模型记忆已就绪 ✓（新建 {len(result['created'])} 项，已有内容未覆盖）")
+    print(f"  位置：{result['root']}")
+
+
+def cmd_contract(args: argparse.Namespace) -> None:
+    from claude_hh import delivery
+
+    try:
+        result = delivery.create_contract(
+            root=_delivery_project(args),
+            goal=" ".join(args.goal),
+            acceptance_criteria=args.ac or [],
+            risk=args.risk,
+            allowed_context=args.allow or [],
+        )
+    except ValueError as exc:
+        _delivery_failure(exc)
+        return
+    print(f"交付合同已锁定 ✓（{len(result['acceptance_criteria'])} 条验收标准，风险 {result['risk']}）")
+    print("  位置：.delivery/contract.json")
+
+
+def cmd_context(args: argparse.Namespace) -> None:
+    from claude_hh import delivery
+
+    try:
+        result = delivery.compile_context(
+            root=_delivery_project(args),
+            task=" ".join(args.task),
+            agent=args.agent,
+            context_paths=args.include or [],
+        )
+    except ValueError as exc:
+        _delivery_failure(exc)
+        return
+    print(f"{result['agent']} 的最小上下文已生成 ✓")
+    print(f"  已读取 {len(result['included_paths'])} 份授权资料，拒绝 {len(result['denied_paths'])} 份")
+    print("  位置：.delivery/context_bundle.md")
+
+
+def cmd_evidence(args: argparse.Namespace) -> None:
+    from claude_hh import delivery
+
+    try:
+        result = delivery.add_evidence(
+            root=_delivery_project(args),
+            kind=args.kind,
+            artifact=args.artifact,
+            outcome=args.outcome,
+        )
+    except ValueError as exc:
+        _delivery_failure(exc)
+        return
+    print(f"artifact 声明回执已登记 ✓（{result['kind']} / {result['outcome']}）")
+    print(f"  文件：{result['artifact']}  SHA-256：{result['sha256'][:12]}…")
+    print("  边界：只证明该文件登记时的身份与当前 hash，不证明内容真实或生产就绪。")
+
+
+def cmd_readiness(args: argparse.Namespace) -> None:
+    from claude_hh import delivery
+
+    try:
+        result = delivery.evaluate_readiness(_delivery_project(args))
+    except ValueError as exc:
+        _delivery_failure(exc)
+        return
+    print(f"当前交付等级：{result['level']}")
+    declared = result["declared_evidence"]
+    if declared:
+        print("  当前声明回执（未独立验证）：" + "、".join(declared))
+    verified = result["verified_evidence"]
+    if verified:
+        print("  当前受信宿主验证：" + "、".join(verified))
+    missing = result["missing_for_observed_healthy"]
+    if missing:
+        print("  尚缺已验证证据：" + "、".join(missing))
+    else:
+        print("  Preview、Pilot、Production 与线上健康证据均已齐全 ✓")
+
+
+def cmd_learn(args: argparse.Namespace) -> None:
+    from claude_hh import delivery
+
+    try:
+        result = delivery.record_learning(
+            root=_delivery_project(args),
+            text=" ".join(args.text),
+            requested_basket=args.basket,
+            source_type=args.source_type,
+            evidence_id=args.evidence_id,
+        )
+    except ValueError as exc:
+        _delivery_failure(exc)
+        return
+    if result["basket"] != result["requested_basket"]:
+        print("学习候选没有足够证据，已降为 confirm，等待 PM 确认。")
+    else:
+        print(f"学习候选已进入 {result['basket']} 篮子 ✓")
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="harness", description="Claude H-H v1.0 — spec-first pipeline",
+    ap = argparse.ArgumentParser(prog="harness", description=f"LoopHarness {__version__} — 跨模型可靠交付层",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""  init            初始化项目\n  start [desc]    开始 pipeline\n  advance         推进阶段\n  retreat         手动回退\n  status          查看状态\n  reset           重置\n  hermes-review   审核提议
   feedback "..."  PM 反馈，下次 pipeline 时反思
   hermes-show     显示合并后的 implicit expectations 清单
+  memory-init     初始化跨模型共享记忆（幂等、不覆盖）
+  contract        创建 Delivery Contract
+  context         为 Claude/Codex/Kimi/GLM 生成最小上下文
+  evidence        登记 artifact 声明回执（不自证内容）
+  readiness       分开查看 declared/verified 与交付等级
+  learn           记录 adopt/confirm/receipt_only 学习候选
   antagonist run  跑 G4 跨家族终审（≥2 家 P0=0 × 3 轮才放行 DEPLOY）
   antagonist reset  G4 修完代码后清掉 unfixed 标记"""))
     ap.add_argument("--project", default=None)
@@ -1068,10 +1211,39 @@ def main() -> None:
     for c in ("advance","retreat","status","reset","hermes-review"): sub.add_parser(c)
     pf = sub.add_parser("feedback"); pf.add_argument("text", nargs="*")
     sub.add_parser("hermes-show")
+    sub.add_parser("memory-init")
+    pc = sub.add_parser("contract")
+    pc.add_argument("goal", nargs="+")
+    pc.add_argument("--ac", action="append", required=True)
+    pc.add_argument("--risk", choices=["low", "medium", "high"], default="medium")
+    pc.add_argument("--allow", action="append", default=[])
+    px = sub.add_parser("context")
+    px.add_argument("task", nargs="+")
+    px.add_argument("--agent", choices=["claude", "codex", "kimi", "glm"], required=True)
+    px.add_argument("--include", action="append", default=[])
+    pe = sub.add_parser("evidence")
+    pe.add_argument(
+        "kind",
+        choices=["functional", "preview", "security", "rollback", "deployment", "production_health"],
+    )
+    pe.add_argument("artifact")
+    pe.add_argument("--outcome", default="passed")
+    sub.add_parser("readiness")
+    pl = sub.add_parser("learn")
+    pl.add_argument("text", nargs="+")
+    pl.add_argument("--basket", choices=["adopt", "confirm", "receipt_only"], required=True)
+    pl.add_argument(
+        "--source-type",
+        choices=["model_reflection", "evidence_receipt"],
+        required=True,
+    )
+    pl.add_argument("--evidence-id", default="")
     pa = sub.add_parser("antagonist"); pa.add_argument("antagonist_cmd", nargs="?", choices=["run","reset"], default="run")
     args = ap.parse_args()
     {"init":cmd_init,"start":cmd_start,"advance":cmd_advance,"retreat":cmd_retreat,
      "status":cmd_status,"reset":cmd_reset,"hermes-review":cmd_hermes_review,"feedback":cmd_feedback,
-     "hermes-show":cmd_hermes_show,"antagonist":cmd_antagonist}.get(args.cmd, lambda _: ap.print_help())(args)
+     "hermes-show":cmd_hermes_show,"antagonist":cmd_antagonist,"memory-init":cmd_memory_init,
+     "contract":cmd_contract,"context":cmd_context,"evidence":cmd_evidence,"readiness":cmd_readiness,
+     "learn":cmd_learn}.get(args.cmd, lambda _: ap.print_help())(args)
 
 if __name__ == "__main__": main()

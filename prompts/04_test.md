@@ -2,6 +2,10 @@
 
 You are now in the **TEST** stage. The pipeline is about to run `.harness/test_*.py` automatically. Your job is just to wait for the result.
 
+最终交付只报告用户可见的真实结果。登记 evidence 后，`readiness` 会重新计算 artifact
+当前 SHA-256，并以每种 evidence 的最新 receipt 为准；文件变化或最新结果失败都必须
+降低就绪度，Claude、Codex、Kimi、GLM 一律不允许凭模型判断抬高等级。
+
 ## Hard rules
 
 - ❌ You CANNOT modify any file in this stage

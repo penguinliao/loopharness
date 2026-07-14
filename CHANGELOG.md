@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.4.0 — 2026-07-14 (LoopHarness 跨模型可靠交付层)
+
+- 公开展示名升级为 **LoopHarness**，首要用户明确为非技术 PM 与超级个体；仓库名和
+  Python 包名保持兼容。
+- 新增 `memory-init / contract / context / evidence / readiness / learn` 六个命令，
+  最小上下文 adapter 支持 Claude、Codex、Kimi、GLM。
+- Delivery Contract 只授权项目内非敏感路径；`.env`、凭据、项目外路径、超限与不可读
+  文件均不会进入 context bundle。
+- evidence receipt 保存相对路径、SHA-256、大小、种类和声明结果；默认 receipt 为
+  `declared`，只证明 artifact 身份和当前 hash，不证明内容真实。readiness 分开展示当前
+  `declared` 与受信宿主写入的 `verified`，且只用 verified 计算交付等级。
+- 学习收敛为 `adopt / confirm / receipt_only` 三篮子。模型反思无权自行 adopt；只有用户
+  明确指令或当前有效 evidence receipt 可以直接采纳。agent CLI 不允许声明
+  `user_explicit`；该来源只供验证了用户身份的宿主通过 library API 调用。
+- `.delivery` 或 `.agent-memory` 为 symlink 时所有写入口 fail closed；`harness init` 会
+  精确移除旧 `.claude-hh/hooks/`，并把当前 pre-edit/stop hook 各收敛为一份。
+- `install.sh` 可在全新 HOME 幂等安装，并生成脱离源码目录也能运行的 `harness` 可执行文件。
+- 原有 `init/start/advance/status` 旅程与 Claude 项目 hooks 保持兼容。
+
 ## v1.3.0 — 2026-06-10 (Claude 干净上下文二审：自动化双重验证)
 
 PM 手动"开新对话独立审查"的双重验证自动化进 REVIEW 阶段。advance 现在跑四道门，

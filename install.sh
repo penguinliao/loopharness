@@ -1,47 +1,70 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Claude H-H v1.0 installer
-# Usage: bash install.sh
-# Or:    curl -sSL https://raw.githubusercontent.com/penguinliao/claude-hh/main/install.sh | bash
-
-INSTALL_DIR="${CLAUDE_HH_DIR:-$HOME/.claude-hh}"
+# LoopHarness v1.4 installer
+# Optional overrides: CLAUDE_HH_DIR=/path HARNESS_BIN_DIR=/path
+INSTALL_DIR="${CLAUDE_HH_DIR:-${HOME}/.loopharness}"
+BIN_DIR="${HARNESS_BIN_DIR:-${HOME}/.local/bin}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Installing Claude H-H v1.0 to $INSTALL_DIR ..."
+echo "Installing LoopHarness v1.4 to ${INSTALL_DIR} ..."
 
-mkdir -p "$INSTALL_DIR/claude_hh"
-mkdir -p "$INSTALL_DIR/hooks"
-mkdir -p "$INSTALL_DIR/prompts"
-mkdir -p "$INSTALL_DIR/hermes"
+mkdir -p "${INSTALL_DIR}/claude_hh" "${INSTALL_DIR}/hooks" \
+  "${INSTALL_DIR}/prompts" "${INSTALL_DIR}/hermes" "${BIN_DIR}"
+cp -R "${REPO_DIR}/claude_hh/." "${INSTALL_DIR}/claude_hh/"
+cp -R "${REPO_DIR}/hooks/." "${INSTALL_DIR}/hooks/"
+cp -R "${REPO_DIR}/prompts/." "${INSTALL_DIR}/prompts/"
+cp -R "${REPO_DIR}/hermes/." "${INSTALL_DIR}/hermes/"
+find "${INSTALL_DIR}" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "${INSTALL_DIR}" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
-cp -r "$REPO_DIR/claude_hh/." "$INSTALL_DIR/claude_hh/"
-cp -r "$REPO_DIR/hooks/." "$INSTALL_DIR/hooks/"
-cp -r "$REPO_DIR/prompts/." "$INSTALL_DIR/prompts/"
-cp -r "$REPO_DIR/hermes/." "$INSTALL_DIR/hermes/"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf 'PYTHONPATH=%q exec python3 -m claude_hh.pipeline "$@"\n' "${INSTALL_DIR}"
+} > "${BIN_DIR}/harness"
+chmod 755 "${BIN_DIR}/harness"
 
-ALIAS_LINE="alias harness=\"PYTHONPATH=$INSTALL_DIR python3 -m claude_hh.pipeline\""
+PATH_MARKER="# LoopHarness PATH"
+PATH_LINE="export PATH=\"${BIN_DIR}:\$PATH\""
 
-add_alias() {
+retire_legacy_harness_alias() {
   local rc="$1"
-  if [[ -f "$rc" ]] && grep -q "alias harness=" "$rc" 2>/dev/null; then
-    echo "  (alias already in $rc, skipping)"
+  local temp_rc="${rc}.loopharness.$$"
+
+  cp -p "${rc}" "${temp_rc}"
+  awk '
+    /^[[:space:]]*alias[[:space:]]+harness=/ &&
+      index($0, "python3 -m claude_hh.pipeline") { next }
+    { print }
+  ' "${rc}" > "${temp_rc}"
+
+  if cmp -s "${rc}" "${temp_rc}"; then
+    rm -f "${temp_rc}"
     return
   fi
-  printf "\n# Claude H-H\n%s\n" "$ALIAS_LINE" >> "$rc"
-  echo "  Added alias to $rc"
+
+  mv "${temp_rc}" "${rc}"
+  echo "  Retired legacy harness alias in ${rc}"
 }
 
-[[ -f "$HOME/.zshrc" ]]  && add_alias "$HOME/.zshrc"
-[[ -f "$HOME/.bashrc" ]] && add_alias "$HOME/.bashrc"
+add_path() {
+  local rc="$1"
+  if grep -Fq "${PATH_MARKER}" "${rc}" 2>/dev/null; then
+    echo "  (PATH already configured in ${rc}, skipping)"
+    return
+  fi
+  printf '\n%s\n%s\n' "${PATH_MARKER}" "${PATH_LINE}" >> "${rc}"
+  echo "  Added PATH to ${rc}"
+}
+
+for shell_rc in "${HOME}/.zshrc" "${HOME}/.bashrc"; do
+  if [[ -f "${shell_rc}" ]]; then
+    retire_legacy_harness_alias "${shell_rc}"
+    add_path "${shell_rc}"
+  fi
+done
 
 echo ""
-echo "Claude H-H v1.0 installed to $INSTALL_DIR"
-echo ""
-echo "Next steps:"
-echo "  1. source ~/.zshrc   (or open a new terminal)"
-echo "  2. cd your-project"
-echo "  3. harness init"
-echo "  4. harness start \"your task description\""
-echo ""
-echo "See examples/sample_spec.md for how to write a good spec."
+echo "LoopHarness v1.4 installed."
+echo "Executable: ${BIN_DIR}/harness"
+echo "Run: harness -h"

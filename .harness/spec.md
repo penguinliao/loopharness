@@ -1,80 +1,56 @@
-# spec：loop 化② — fresh-context 调度 + 外测独立验收(不押注浊龙)
+# LoopHarness v1.4：跨模型可靠交付层与公开发布
 
-## 背景与目标
+## 目标
 
-实测证据(claude-hh-experiments)：把同一任务挂上 H-H 后，判定结果一致，
-但成本 2.4×、轮次 27 vs 6、cache_read 5.8×。根因 = 实现/返工在**单条长会话**里
-自我监工，每轮重读全部历史(re-read 税)。loop engineering 共识：进度落文件、
-每轮 fresh context、独立验收在单独进程跑。
+把当前本机已验证使用的 Harness 新能力整理为可公开安装的 v1.4，并把产品首要用户明确为“刚开始用 AI coding、不会审代码但需要可靠交付的非技术 PM 与超级个体”。公开产品展示名使用 **LoopHarness**，本轮保留现有 GitHub 仓库和 Python 包名以避免旧链接失效。
 
-本任务只做**两个被证据支撑、且可测**的改动，其余划到范围外（见末尾）。
+## Acceptance criteria
 
-PM 心智模型（本 spec 采用此定义）：
-- **内测** = Claude 自己写测试 + 自跑 + 自检（白盒、自报、便宜，拦显眼问题）
-- **外测** = 独立 agent 验收（干净上下文，只看 spec + 产物，不信任自报；真关卡）
+| # | Criterion | Priority |
+|---|-----------|----------|
+| AC1 | 干净源码运行 `harness -h` 时保留原有 pipeline 命令，并新增 `memory-init / contract / context / evidence / readiness / learn`；上下文适配器明确支持 `claude / codex / kimi / glm`。 | P0 |
+| AC2 | Delivery Contract 只授权项目内非敏感路径；最小上下文只读取合同允许的文件，拒绝越界路径、`.env`、密钥/凭据文件、超限或不可读文件，且拒绝内容不会进入生成的 context bundle。 | P0 |
+| AC3 | Evidence receipt 保存 artifact 相对路径、SHA-256、大小、种类和结果；`readiness` 必须重新核对 artifact 当前 hash，并按每类最新 receipt 判定，文件被改动或最新结果失败时不得虚报更高就绪度。 | P0 |
+| AC4 | 学习候选只分 `adopt / confirm / receipt_only`；模型自我反思不得直接 adopt，只有用户明确指令或真实有效 evidence receipt 可以进入 adopt，否则自动降为 confirm。 | P0 |
+| AC5 | `install.sh` 在全新 HOME 下可重复执行，安装标准库实现并生成可执行 `~/.local/bin/harness`；第二次安装不重复污染 shell 配置，安装后无需依赖源码目录即可运行帮助和 Delivery 命令。 | P0 |
+| AC6 | 公开候选仓库不得包含 `/Users/<local-user>` 等本机绝对路径、真实高熵 API key/token、`.bak-*`、运行日志、缓存或真实项目资料；CLI 错误不得打印秘密文件内容。 | P0 |
+| AC7 | README 首屏以 LoopHarness 和非技术 PM/超级个体为核心，明确 Codex、Claude、Kimi、GLM 的真实支持边界，提供 3 分钟可复制 Demo、可信测试证据链接、适合/不适合人群，并删除“仅支持 Claude Code”等过时承诺。 | P0 |
+| AC8 | 版本统一为 `1.4.0`；原有 12 条基线测试与新增门禁全绿，`ruff`、`py_compile`、干净安装 smoke 均通过。 | P0 |
+| AC9 | 仓库名和 Python 包名本轮保持兼容；产品展示名改变不得破坏旧 `harness init/start/advance/status` 用户旅程。 | P1 |
 
-已知约束：浊龙黑盒 UI 自动化最近一次实测埋雷发现率仅 20%（2026-06-11），
-故**外测不得把放行依据押在浊龙上**。
+## Affected files
 
-> 注：本任务有意**反转** v1.0.x 协议"不派子 agent"的决定——单长会话正是 2.4× 的根因。
-> fresh 子 agent 派工是本次核心取舍，已经 PM 拍板。
+| File | Change |
+|------|--------|
+| `claude_hh/delivery.py` | 新增跨模型记忆、合同、上下文、证据、就绪度与三篮子学习，并补证据实时校验。 |
+| `claude_hh/pipeline.py` | 注册六个交付命令，更新用户可见帮助和跨模型文案。 |
+| `claude_hh/__init__.py` | 版本升级到 1.4.0。 |
+| `claude_hh/tests/test_delivery.py` | 正式回归测试。 |
+| `prompts/01_spec.md` | 同步部署版跨模型交付上下文要求。 |
+| `prompts/02_implement.md` | 同步部署版 IMPLEMENT 约束。 |
+| `prompts/03_review.md` | 同步部署版独立审查约束。 |
+| `prompts/04_test.md` | 同步部署版最终用户可见结果门禁。 |
+| `install.sh` | 幂等安装与 `~/.local/bin/harness` 入口。 |
+| `README.md` | LoopHarness 跨模型定位、3 分钟 Demo、证据和用户边界。 |
+| `CHANGELOG.md` | v1.4 变更记录。 |
+| `RELEASE_NOTES.md` | GitHub 发布说明。 |
+| `pyproject.toml` | 版本与描述更新。 |
+| `.gitignore` | 忽略本地规划、Harness 运行态、缓存、日志和备份。 |
 
-## 改动文件
+## 测试策略
 
-- `claude_hh/pipeline.py`：新增外测独立验收门禁 `_check_external_review`；
-  改 `_finish_test` 使放行/回炉只由"独立验收 verdict"决定，浊龙降级为**仅记录的旁证**，
-  其 PASS/FAIL 永不影响门禁判定。
-- `prompts/02_implement.md`：开工指令改为"派一个 fresh 子 agent 做本轮开发/返工，
-  只喂 spec + 错题本 + 相关文件；干完写盘退出；不要在主会话里累积"。
-- `prompts/06_external_test.md`（新增）：外测——派独立验收 agent 干净上下文核 AC，
-  Web 可加浊龙截图当旁证。
-- `CLAUDE.md`：协议补"fresh-context 派工 + 两个 PM checkpoint + 外测独立验收"段。
+**黑盒测试不需要。** 本任务没有 GUI；用户旅程是本地 CLI，新增测试会在临时 HOME/临时项目中启动真实 Python 子进程，覆盖帮助、安装、合同、上下文、证据、就绪度和学习的最终可见结果。GitHub 页面发布后再用远端页面/API 做只读核验。
 
-## 验收标准（P0）
+## Out of scope
 
-**AC1（P0｜外测放行只看独立验收，不看浊龙）**
-`_check_external_review(root)` 读 `.harness/external_review.md` 末段，
-严格词边界匹配 PASS/FAIL（过滤 ``` 代码块）。
-- external_review = PASS 且 zhuolong_report = FAIL → 返回 ("pass", _)（**浊龙 FAIL 不拦**）
-- external_review = FAIL 且 zhuolong_report = PASS → 返回 ("fail", 原因)（**浊龙 PASS 不放水**）
-- external_review 缺失/无判定 → 返回 ("wait", _)（不烧 retreat 预算）
+- 本轮不改 GitHub 仓库 URL 和 Python 包名；先用展示名验证传播效果。
+- 本轮不承诺具体 Star 数，不购买 Star、不自动群发推广。
+- 本轮不发布 PyPI 包；GitHub 安装与源码安装先闭环。
+- 本轮不把用户级强制 Opus hooks、真实项目 Hermes、日志或安装目录备份公开。
+- 本轮不改变 G4 第三方 API 的凭据配置方式。
 
-**AC2（P0｜浊龙仅旁证、永不改判）**
-同一 external_review 判定下，喂入浊龙报告 PASS / FAIL / 缺失三种，
-`_check_external_review` 的决策（pass/fail/wait）必须**完全一致**——浊龙对门禁零影响。
+## 风险与停止条件
 
-**AC3（P0｜外测 fail 自动回炉，预算耗尽诚实交付，永不挂起）**
-external_review = FAIL 且 retreat_count < 3 → 回 IMPLEMENT，
-原因 append 进 `retreat_log.md`（错题本）。
-external_review = FAIL 且 retreat_count ≥ 3 → 带病交付（done + `delivery_report.md` 列遗留），
-绝不卡死（stuck）。
-
-**AC4（P0｜错题本每轮 fresh worker 必读 + 有界派工）**
-`prompts/02_implement.md` 含明确指令：本轮开工**第一步读 `.harness/retreat_log.md`**，
-不重复已失败的改法；且含"派 fresh 子 agent、只喂 spec + 错题本 + 相关文件"的有界派工指令。
-
-**AC5（P0｜独立验收跑在干净上下文、fail-open 不阻塞）**
-`prompts/06_external_test.md` 明确：独立验收 agent **只看 spec + 产物**、看不到实现过程；
-判定写 `external_review.md`。验收工具不可用 → fail-open（记日志、不阻塞），与二审/三审同策略。
-
-## 测试方案
-
-- **内测（本仓库 .harness/test_loop_eng2.py，pytest）**：
-  - 构造临时 .harness 目录，写不同组合的 `external_review.md` / `zhuolong_report.md`，
-    调 `_check_external_review`，断言门禁决策（AC1/AC2）；构造 FAIL + 不同 retreat_count
-    断言回炉/带病交付（AC3）。
-  - 读 `prompts/02_implement.md` / `prompts/06_external_test.md` 断言关键指令存在（AC4/AC5）。
-  - 每用例 walltime < 5s；dummy env 注入；禁 bare assert；tempfile 隔离。
-- **外测（本任务自身吃狗粮）**：改造后用新流程跑"实现它自己"，
-  由独立验收 agent 对照本 spec AC 干净核对，verdict 落 `external_review.md`。
-- **归档旧 test**：`test_ac_zhuolong_loop.py` 测的是"浊龙 FAIL→回炉"旧门禁前提，
-  与本次"浊龙仅旁证"设计矛盾，归档到 `.harness/archive_loop_eng2/`（覆盖不丢——
-  同样的回炉/带病交付/正常 done 三行为由 test_loop_eng2.py 用 external_review 承接）。
-
-## 不在本次范围（活协议边界，下轮再做）
-
-- 把 pipeline 的 REVIEW/TEST 阶段**物理重命名/重排**成内测/外测两段独立 stage——
-  本次复用现有 stage 承载语义，不动 stage 枚举，降风险。
-- 真机小程序/App 外测自动化（技术上需人工点，非本次架构能解决）。
-- 调度员"派 fresh 子 agent"的**硬性 hook 强制**（本次靠 prompt + 协议指令，
-  hook 物理拦截留待数据证明必要后再加，避免过度脚手架）。
+- 安装版功能无法由测试解释或依赖本机私有状态：不移植，记录为内部实验。
+- 秘密扫描、干净安装或证据 fail-closed 任一 P0 失败：禁止推送默认分支。
+- README 中的效果数字无法回到仓库证据：删除或改成明确实验条件，不扩大宣传。
