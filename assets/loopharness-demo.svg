@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="840" viewBox="0 0 1440 840" role="img" aria-labelledby="title desc">
+  <title>LoopHarness delivery flight recorder</title>
+  <desc>A four-stage delivery record showing a contract, a context bundle, declared evidence, Contract-only readiness, and invalidation after an artifact changes.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17202a"/>
+      <stop offset="1" stop-color="#0c1117"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#26323d" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000" flood-opacity=".35"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="840" fill="#080d12"/>
+  <rect width="1440" height="840" fill="url(#grid)" opacity=".55"/>
+  <rect x="54" y="48" width="1332" height="744" rx="22" fill="url(#panel)" stroke="#34424f" stroke-width="2" filter="url(#shadow)"/>
+
+  <circle cx="88" cy="82" r="7" fill="#f4b942"/>
+  <circle cx="112" cy="82" r="7" fill="#426577"/>
+  <circle cx="136" cy="82" r="7" fill="#426577"/>
+  <text x="170" y="91" fill="#dce7ec" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="28" font-weight="700">LOOPHARNESS / DELIVERY FLIGHT RECORDER</text>
+  <text x="1284" y="90" text-anchor="end" fill="#7f939f" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">LOCAL · FILE-FIRST · HONEST</text>
+
+  <text x="88" y="152" fill="#f4b942" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="3">SWITCH AGENTS. KEEP THE CONTRACT.</text>
+  <text x="88" y="194" fill="#f5f8f9" font-family="Georgia, serif" font-size="38">“Done” is a claim. Evidence has a current state.</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <rect x="88" y="240" width="280" height="250" rx="14" fill="#101820" stroke="#566976"/>
+    <text x="112" y="278" fill="#f4b942" font-size="15" letter-spacing="2">01 / DELIVERY CONTRACT</text>
+    <text x="112" y="326" fill="#f1f5f7" font-size="22" font-weight="700">Goal locked</text>
+    <text x="112" y="362" fill="#9fb1bb" font-size="17">2 acceptance criteria</text>
+    <text x="112" y="392" fill="#9fb1bb" font-size="17">risk: medium</text>
+    <text x="112" y="422" fill="#9fb1bb" font-size="17">allowed: docs/brief.md</text>
+    <rect x="112" y="447" width="116" height="24" rx="12" fill="#213b30"/>
+    <text x="170" y="464" text-anchor="middle" fill="#73d99a" font-size="13">LOCKED</text>
+
+    <path d="M382 365h42" stroke="#f4b942" stroke-width="3"/>
+    <path d="m418 357 12 8-12 8" fill="none" stroke="#f4b942" stroke-width="3"/>
+
+    <rect x="438" y="240" width="280" height="250" rx="14" fill="#101820" stroke="#566976"/>
+    <text x="462" y="278" fill="#f4b942" font-size="15" letter-spacing="2">02 / CONTEXT BUNDLE</text>
+    <text x="462" y="326" fill="#f1f5f7" font-size="22" font-weight="700">Agent: Codex</text>
+    <text x="462" y="362" fill="#9fb1bb" font-size="17">included: 1 file</text>
+    <text x="462" y="392" fill="#9fb1bb" font-size="17">denied: 0 files</text>
+    <text x="462" y="422" fill="#9fb1bb" font-size="17">contract travels with task</text>
+    <rect x="462" y="447" width="116" height="24" rx="12" fill="#203644"/>
+    <text x="520" y="464" text-anchor="middle" fill="#7bc4e5" font-size="13">MINIMAL</text>
+
+    <path d="M732 365h42" stroke="#f4b942" stroke-width="3"/>
+    <path d="m768 357 12 8-12 8" fill="none" stroke="#f4b942" stroke-width="3"/>
+
+    <rect x="788" y="240" width="280" height="250" rx="14" fill="#101820" stroke="#566976"/>
+    <text x="812" y="278" fill="#f4b942" font-size="15" letter-spacing="2">03 / DECLARED EVIDENCE</text>
+    <text x="812" y="326" fill="#f1f5f7" font-size="22" font-weight="700">functional.txt</text>
+    <text x="812" y="362" fill="#9fb1bb" font-size="17">outcome: passed</text>
+    <text x="812" y="392" fill="#9fb1bb" font-size="17">sha256: a92b7fdcb45e…</text>
+    <text x="812" y="422" fill="#9fb1bb" font-size="17">content not self-verified</text>
+    <rect x="812" y="447" width="116" height="24" rx="12" fill="#4a3619"/>
+    <text x="870" y="464" text-anchor="middle" fill="#f4c96b" font-size="13">DECLARED</text>
+
+    <path d="M1082 365h42" stroke="#f4b942" stroke-width="3"/>
+    <path d="m1118 357 12 8-12 8" fill="none" stroke="#f4b942" stroke-width="3"/>
+
+    <rect x="1138" y="240" width="216" height="250" rx="14" fill="#101820" stroke="#f4b942" stroke-width="2"/>
+    <text x="1162" y="278" fill="#f4b942" font-size="15" letter-spacing="2">04 / READINESS</text>
+    <text x="1162" y="332" fill="#f5f8f9" font-size="21" font-weight="700">CONTRACT-ONLY</text>
+    <text x="1162" y="370" fill="#9fb1bb" font-size="14">declared ≠ verified</text>
+    <text x="1162" y="400" fill="#9fb1bb" font-size="13">6 checks still missing</text>
+    <rect x="1162" y="447" width="150" height="24" rx="12" fill="#4a3619"/>
+    <text x="1237" y="464" text-anchor="middle" fill="#f4c96b" font-size="13">NO SELF-CERTIFY</text>
+
+    <rect x="88" y="538" width="1266" height="164" rx="14" fill="#0b1218" stroke="#8f4e46" stroke-width="2"/>
+    <text x="116" y="580" fill="#e3786e" font-size="15" letter-spacing="2">ARTIFACT CHANGED / RECEIPT RE-CHECKED</text>
+    <text x="116" y="626" fill="#f1f5f7" font-size="25" font-weight="700">functional.txt hash mismatch</text>
+    <text x="116" y="662" fill="#9fb1bb" font-size="17">The old declaration is no longer current. Readiness stays honest.</text>
+    <rect x="1124" y="586" width="188" height="52" rx="26" fill="#462724" stroke="#e3786e"/>
+    <text x="1218" y="619" text-anchor="middle" fill="#ff9b91" font-size="18" font-weight="700">INVALIDATED</text>
+
+    <text x="88" y="756" fill="#6f838f" font-size="15">CLAUDE  ·  CODEX  ·  KIMI  ·  GLM</text>
+    <text x="1354" y="756" text-anchor="end" fill="#6f838f" font-size="15">PROJECT-OWNED MEMORY / CURRENT ARTIFACT IDENTITY</text>
+  </g>
+</svg>

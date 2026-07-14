@@ -7,6 +7,7 @@ from pathlib import Path
 
 from claude_hh import __version__
 from claude_hh.antagonist import SIMILARITY_THRESHOLD
+from claude_hh.delivery import _is_sensitive
 
 # 连续 N 次失败原因相似 → 判定「原地打转」提前 stuck（loop engineering 护栏③：无进展检测，
 # 原文即"两轮无变化即退出"）。复用 antagonist 的 SIMILARITY_THRESHOLD，不另造阈值数字。
@@ -15,6 +16,9 @@ SAME_REASON_LIMIT = 2
 # loop engineering 护栏②（成本预算）最小版：累计本条 pipeline 的 LLM 审查调用次数，超此软上限
 # 只「提醒」PM 不熔断（先观察真实花费数据再决定要不要硬卡）。正常 standard 任务约 2-8 次。
 SOFT_REVIEW_BUDGET = 12
+
+# Reviewer 必须看到完整安全 diff；超过预算时拆批，禁止只审前缀后假绿。
+MAX_REVIEW_DIFF_CHARS = 80_000
 
 CLAUDE_MD_GUIDE = """\
 <!-- claude-hh:auto-start-guide v1.0.6 -->
@@ -209,24 +213,194 @@ def _impl_diff_size(root: Path) -> "tuple[int,int] | None":
     return (int(ins_m.group(1)) if ins_m else 0, int(del_m.group(1)) if del_m else 0)
 
 
-_CODE_SUFFIXES = (".py", ".js", ".ts", ".tsx", ".vue", ".go", ".rs", ".java", ".rb", ".php")
+_IMPLEMENTATION_SUFFIXES = {
+    ".bash", ".css", ".go", ".html", ".java", ".js", ".json", ".jsx",
+    ".kt", ".md", ".php", ".py", ".pyi", ".rb", ".rs", ".rst", ".scss",
+    ".sh", ".svg", ".swift", ".toml", ".ts", ".tsx", ".txt", ".vue",
+    ".xml", ".yaml", ".yml", ".zsh",
+}
+_IMPLEMENTATION_FILENAMES = {"Dockerfile", "Makefile"}
+_IMPLEMENTATION_IGNORED_PARTS = {
+    ".agent-memory", ".cache", ".delivery", ".git", ".harness", ".mypy_cache",
+    ".next", ".nox", ".pytest_cache", ".ruff_cache", ".tox", ".venv",
+    "__pycache__", "build", "coverage", "dist", "htmlcov", "node_modules",
+    "out", "target", "venv",
+}
+_IMPLEMENTATION_IGNORED_FILES = {"findings.md", "progress.md", "task_plan.md"}
+
+
+def _is_product_artifact(relative: Path) -> bool:
+    """Return whether a project-relative path is safe, reviewable product work."""
+    lowered_parts = {part.lower() for part in relative.parts}
+    if lowered_parts & _IMPLEMENTATION_IGNORED_PARTS:
+        return False
+    if relative.name.lower() in _IMPLEMENTATION_IGNORED_FILES:
+        return False
+    if _is_sensitive(relative.as_posix()):
+        return False
+    return (
+        relative.name in _IMPLEMENTATION_FILENAMES
+        or relative.suffix.lower() in _IMPLEMENTATION_SUFFIXES
+    )
+
+
+def _git_path_changed_since(root: Path, relative: Path, since_iso: "str|None") -> "bool|None":
+    """Check the same candidate path in Git; None means this is not a Git worktree."""
+    try:
+        status = subprocess.run(
+            [
+                "git", "--literal-pathspecs", "status", "--porcelain=v1",
+                "--untracked-files=all", "--", relative.as_posix(),
+            ],
+            cwd=str(root), capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    if status.returncode != 0:
+        return None
+    if status.stdout.strip():
+        return True
+    if not since_iso:
+        return False
+    try:
+        committed = subprocess.run(
+            [
+                "git", "--literal-pathspecs", "log", "--oneline",
+                f"--since={since_iso}", "--", relative.as_posix(),
+            ],
+            cwd=str(root), capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    return committed.returncode == 0 and bool(committed.stdout.strip())
+
+
+def _has_recent_product_change(root: Path, entered_at: float, since_iso: "str|None" = None) -> bool:
+    """Return whether this stage changed one current, reviewable product artifact."""
+    for path in root.rglob("*"):
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            if not _is_product_artifact(relative):
+                continue
+            if path.stat().st_mtime <= entered_at:
+                continue
+            git_changed = _git_path_changed_since(root, relative, since_iso)
+            if git_changed is not False:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _format_new_file_as_diff(root: Path, rel_path: str) -> str:
     """把新增的 untracked 文件格式化成 unified diff 片段（让 reviewer 看得见）."""
     p = root / rel_path
-    if not p.exists() or p.is_dir():
+    if p.is_symlink() or not p.exists() or p.is_dir():
         return ""
-    if p.suffix not in _CODE_SUFFIXES:
+    if not _is_product_artifact(Path(rel_path)):
         return ""
     try:
         content = p.read_text(errors="replace")
     except OSError:
         return ""
-    # 大文件截断（防超 token）
-    lines = content.splitlines()[:500]
+    lines = content.splitlines()
     body = "\n".join("+" + ln for ln in lines)
     return f"diff --git a/{rel_path} b/{rel_path}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel_path}\n{body}\n"
+
+
+def _reviewable_git_path(root: Path, rel_path: str) -> bool:
+    """Apply one safety policy to every tracked, committed, and untracked path."""
+    relative = Path(rel_path)
+    if not rel_path or relative.is_absolute() or ".." in relative.parts:
+        return False
+    if not _is_product_artifact(relative):
+        return False
+    return not (root / relative).is_symlink()
+
+
+def _safe_paths_from_name_status(root: Path, args: list[str]) -> list[str]:
+    """Parse Git name-status output and reject a rename if either side is unsafe."""
+    result = subprocess.run(
+        ["git", "--no-pager", *args],
+        cwd=str(root), capture_output=True, text=True, timeout=30, check=False,
+    )
+    if result.returncode != 0:
+        return []
+    fields = result.stdout.split("\0")
+    safe_paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        path_count = 2 if status[0] in {"R", "C"} else 1
+        group = fields[index:index + path_count]
+        index += path_count
+        if len(group) != path_count or not all(_reviewable_git_path(root, path) for path in group):
+            continue
+        for path in group:
+            if path not in safe_paths:
+                safe_paths.append(path)
+    return safe_paths
+
+
+def _safe_tracked_review_diff(root: Path) -> list[str]:
+    """Return filtered tracked working-tree diffs without textconv or external diff."""
+    paths = _safe_paths_from_name_status(
+        root,
+        ["diff", "--name-status", "-z", "--find-renames=1%", "HEAD"],
+    )
+    if not paths:
+        return []
+    result = subprocess.run(
+        [
+            "git", "--no-pager", "--literal-pathspecs", "diff",
+            "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames=1%",
+            "HEAD", "--", *paths,
+        ],
+        cwd=str(root), capture_output=True, text=True, timeout=30, check=False,
+    )
+    return [result.stdout] if result.returncode == 0 and result.stdout.strip() else []
+
+
+def _safe_committed_review_diff(root: Path, since_iso: str) -> list[str]:
+    """Return filtered patches for commits made during the current IMPLEMENT stage."""
+    commit_result = subprocess.run(
+        ["git", "--no-pager", "rev-list", f"--since={since_iso}", "HEAD"],
+        cwd=str(root), capture_output=True, text=True, timeout=30, check=False,
+    )
+    if commit_result.returncode != 0:
+        return []
+    paths: set[str] = set()
+    parts: list[str] = []
+    for commit in reversed(commit_result.stdout.splitlines()):
+        if not commit:
+            continue
+        paths = set(
+            _safe_paths_from_name_status(
+                root,
+                [
+                    "diff-tree", "--root", "-m", "--no-commit-id", "--name-status",
+                    "-r", "-z", "--find-renames=1%", commit,
+                ],
+            )
+        )
+        if not paths:
+            continue
+        result = subprocess.run(
+            [
+                "git", "--no-pager", "--literal-pathspecs", "show", "--format=",
+                "--patch", "--no-ext-diff", "--no-textconv", "--no-color",
+                "--find-renames=1%", commit, "--", *sorted(paths),
+            ],
+            cwd=str(root), capture_output=True, text=True, timeout=30, check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts.append(result.stdout)
+    return parts
 
 
 def _impl_period_diff(root: Path) -> str:
@@ -239,84 +413,59 @@ def _impl_period_diff(root: Path) -> str:
     """
     parts: list[str] = []
     try:
-        # 1. tracked file diff
-        r = subprocess.run(
-            ["git", "diff", "HEAD"], cwd=str(root),
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            parts.append(r.stdout)
-        # 2. untracked new code files (git diff HEAD 不显示未 add 的新文件)
+        # 1. 本阶段 commits 与 working tree 是并集，不把 commits 当 fallback。
+        state_file = root / ".harness" / "pipeline.json"
+        if state_file.exists():
+            state = json.loads(state_file.read_text())
+            impl_entry = None
+            for entry in state.get("stage_history", []):
+                if entry.get("stage") == "implement":
+                    impl_entry = entry.get("entered_at")
+            if impl_entry:
+                parts.extend(_safe_committed_review_diff(root, impl_entry))
+        # 2. tracked working-tree diff，逐路径复用产品/敏感/symlink 过滤。
+        parts.extend(_safe_tracked_review_diff(root))
+        # 3. untracked 新产品文件（git diff HEAD 不显示未 add 的新文件）。
         r2 = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
             cwd=str(root), capture_output=True, text=True, timeout=10, check=False,
         )
         if r2.returncode == 0:
-            for rel in r2.stdout.splitlines():
-                if rel.startswith(".harness/"):
-                    continue  # 跳过 pipeline 自己的产物
+            for rel in r2.stdout.split("\0"):
+                if not rel:
+                    continue
                 frag = _format_new_file_as_diff(root, rel)
                 if frag:
                     parts.append(frag)
-        if parts:
-            return "\n".join(parts)
-        # 3. fall back to commits made during impl stage
-        state_file = root / ".harness" / "pipeline.json"
-        if not state_file.exists():
-            return ""
-        state = json.loads(state_file.read_text())
-        impl_entry = None
-        for e in state.get("stage_history", []):
-            if e.get("stage") == "implement":
-                impl_entry = e.get("entered_at")
-        if not impl_entry:
-            return ""
-        r3 = subprocess.run(
-            ["git", "log", "-p", f"--since={impl_entry}", "--"],
-            cwd=str(root), capture_output=True, text=True, timeout=30, check=False,
-        )
-        if r3.returncode == 0 and r3.stdout.strip():
-            return r3.stdout
+        return "\n".join(parts)
     except (FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError):
         pass
     return ""
 
 
-def _has_commits_since(root: Path, since_iso: str) -> bool:
-    """Returns True if git log shows any commits since `since_iso`."""
-    try:
-        r = subprocess.run(
-            ["git", "log", "--oneline", f"--since={since_iso}"],
-            cwd=str(root), capture_output=True, text=True, timeout=10, check=False,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return False
-    if r.returncode != 0:
-        return False
-    return bool(r.stdout.strip())
+def _review_diff_size_error(diff_text: str) -> str:
+    """Fail closed when complete review material would exceed the explicit budget."""
+    if len(diff_text) <= MAX_REVIEW_DIFF_CHARS:
+        return ""
+    return (
+        f"审查材料 {len(diff_text):,} 字符，超过完整审查上限 80,000；"
+        "请拆成更小批次，不能静默截断后放行"
+    )
 
 
 def _check_impl(root: Path, state: dict) -> "tuple[bool,str]":
     """Implement check + empty-shell detection (防 feedback_sonnet_empty_delivery):
-    - 至少 1 个 .py 文件 mtime 比 stage 进入时间新（基础检查）
-    - 如果在 git 仓库内：working tree diff == 0 且本 stage 期间也没有 commit → 空壳
+    - 至少 1 个产品代码、文档或配置 mtime 比 stage 进入时间新
+    - Git 仓库还要核对同一路径的 working-tree 状态或本阶段 commit
     """
     hist = state.get("stage_history", [])
     stage_entry_iso = hist[-1]["entered_at"] if hist else None
     ts = datetime.fromisoformat(stage_entry_iso).timestamp() if stage_entry_iso else 0
-    modified = False
-    for py in root.rglob("*.py"):
-        if ".harness" not in py.parts and py.stat().st_mtime > ts:
-            modified = True
-            break
-    if not modified:
-        return False, "AI 还没改任何代码"
+    if not _has_recent_product_change(root, ts, stage_entry_iso):
+        return False, "AI 还没改任何产品代码、文档或配置"
     diff_size = _impl_diff_size(root)
     if diff_size is not None:
         added, deleted = diff_size
-        committed = _has_commits_since(root, stage_entry_iso) if stage_entry_iso else False
-        if added + deleted == 0 and not committed:
-            return False, "文件被碰了但内容没真改（看起来是空壳）。让 AI 真写代码再继续"
         if 0 < added + deleted < 3 and not state.get("retreat_count"):
             print(f"  ⚠️  改动量很小（共 {added + deleted} 行）。如果这就是预期就继续。")
     return True, ""
@@ -393,8 +542,9 @@ def _cross_family_review(root: Path) -> "tuple[bool, str]":
     if not diff_text.strip():
         return True, ""
 
-    if len(diff_text) > 20000:
-        diff_text = diff_text[:20000] + "\n[diff 已截断]"
+    size_error = _review_diff_size_error(diff_text)
+    if size_error:
+        return False, size_error
 
     prompt = CROSS_FAMILY_REVIEW_PROMPT.format(
         spec=spec_text, diff=diff_text, review=review_text,
@@ -456,8 +606,9 @@ def _fresh_context_review(root: Path) -> "tuple[bool, str]":
     diff_text = _impl_period_diff(root)
     if not diff_text.strip():
         return True, ""  # 没东西可审，不烧额度
-    if len(diff_text) > 20000:
-        diff_text = diff_text[:20000] + "\n[diff 已截断]"
+    size_error = _review_diff_size_error(diff_text)
+    if size_error:
+        return False, size_error
     spec_path = root / ".harness" / "spec.md"
     review_path = root / ".harness" / "review_report.md"
     spec_text = spec_path.read_text()[:5000] if spec_path.exists() else "(无)"
